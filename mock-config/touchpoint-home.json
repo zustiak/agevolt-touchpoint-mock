@@ -73,7 +73,7 @@
           "faultedWithTransa",
           "faultedWithoutTransa"
         ],
-        "status": "available"
+        "status": "preparing"
       },
       "activeTx": null
     },
