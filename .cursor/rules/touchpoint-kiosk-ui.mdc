@@ -1,0 +1,32 @@
+---
+description: AgeVolt Touchpoint kiosk UI baseline and flow constraints
+alwaysApply: true
+---
+
+# AgeVolt Touchpoint Kiosk Rule
+
+- Build for a public self-service kiosk on `Wiseasy P5L SSK` in portrait mode, not for a generic mobile app.
+- Keep UI high-contrast black/white only: white background, black text, black outlines, large readable typography.
+- Prefer large rounded cards, big touch targets, minimal text, and one dominant action per screen.
+- Keep a consistent shell/header on all screens with quick access to `Info`, `Support`, and `Language`.
+- Use full-screen overlays (with large close `X`) for secondary screens instead of tiny mobile modals.
+- Treat connector data as per-connector source of truth (`status`, `pricing`, `access`, `meter`, `parkingSpot`).
+- `parkingSpot` is the primary connector label (short string, typically up to 5 chars), not fixed `A/B`.
+- In this phase, focus only on happy-path charging UI with mock data and click-through behavior.
+- Out of scope for now: init/pairing, payment-card app integration, backend API integration, and multi-station control.
+- Supported start methods in scope: RFID local start and QR remote start.
+- If data has both `INIT + OCPP_KEY`, treat `OCPP_KEY` as higher-priority runtime value.
+- State logic to preserve:
+  - `available` -> `preparing` -> `charging`
+  - if charging pauses after first real charge, use `suspended` (not `preparing`)
+  - stop request enters `finishing` before returning to `available`
+  - preparing timeout cancels session after 5:00 if charging never starts
+- Keep remote flow aligned with local flow: accepted remote start/stop must enter the same TX state machine.
+- Remote start is valid only for a specific connector and only when connector has no active TX and is not faulted.
+- Charging detail access is protected: unlock by RFID or 6-digit PIN/session code.
+- For private connector access denied, show clear error message and safe return path.
+- Prioritize small, isolated, reusable React Native components and avoid unnecessary dependency additions.
+- Never use text truncation with ellipsis (`...`) anywhere in the UI. Text must always auto-shrink to fit available space while preserving information.
+- Zoom must be treated as a first-class layout mode on every screen; each screen must be verified at `1x` and `2x` before done.
+- Reuse one shared overlay header pattern for all screens (`Späť` + centered title + right-aligned context box when needed); do not re-implement per screen.
+- Overlay header controls (`Späť`, title row, quick actions row) must keep stable geometry in zoom mode and must not scale like content cards.

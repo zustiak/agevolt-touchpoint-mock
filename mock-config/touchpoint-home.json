@@ -1,0 +1,129 @@
+{
+  "system": {
+    "networkOnline": true,
+    "activeNetwork": "wifi",
+    "iconType": "solid",
+    "ocppConnectionState": "ok"
+  },
+  "operator": {
+    "owner": {
+      "name": "Hotel Lesná"
+    },
+    "provider": {
+      "logo": "AGEVOLT"
+    },
+    "helpdeskNumber": "+421 911 000 111",
+    "helpdeskEmail": "support@agevolt.sk",
+    "appleStoreLink": "https://apps.apple.com/app/agevolt/id000000000",
+    "androidStoreLink": "https://play.google.com/store/apps/details?id=sk.agevolt.app",
+    "chargingLink": "https://charge.agevolt.com"
+  },
+  "station": {
+    "location": {
+      "name": "Hotel Lesná"
+    },
+    "name": "AC Hub",
+    "ocppDeviceId": "TP-SK-HOTEL-001",
+    "defaultLanguage": "SK",
+    "currency": "EUR",
+    "vatRate": 0.23
+  },
+  "connectors": [
+    {
+      "id": "c1",
+      "evseCpoId": "SK*AGV*E1*20517*85*1",
+      "parkingSpot": "A12",
+      "chargingLink": "https://charge.agevolt.com/start?connector=c1",
+      "plugType": "Type 2 Outlet",
+      "powerType": "AC",
+      "phases": 3,
+      "maxAmps": 32,
+      "access": {
+        "unauthorizedFreeCharging": false,
+        "publicCharging": true,
+        "roamingCharging": true,
+        "privateCharging": false
+      },
+      "hasPublicPolicy": true,
+      "budgetAmps": 10,
+      "vehicleSignalV": 12,
+      "connectTimeoutSec": 300,
+      "publicPolicy": {
+        "price": 0.42,
+        "sessionFee": 0.0,
+        "parkingPerHour": 2.5,
+        "graceMinutes": 15,
+        "graceFrom": "end",
+        "occupyPerHour": 8.0,
+        "validNow": true
+      },
+      "meter": {
+        "power": 0,
+        "energy": 0
+      },
+      "ocpp": {
+        "_status": [
+          "available",
+          "EVconnected",
+          "cennectEV",
+          "preparing",
+          "charging",
+          "suspendedEV",
+          "suspendedEVSE",
+          "faultedWithTransa",
+          "faultedWithoutTransa"
+        ],
+        "status": "available"
+      },
+      "activeTx": null
+    },
+    {
+      "id": "c2",
+      "evseCpoId": "SK*AGV*E1*20517*85*2",
+      "parkingSpot": "P9",
+      "chargingLink": "https://charge.agevolt.com/start?connector=c2",
+      "plugType": "Type 2 Outlet",
+      "powerType": "AC",
+      "phases": 3,
+      "maxAmps": 32,
+      "access": {
+        "unauthorizedFreeCharging": false,
+        "publicCharging": false,
+        "roamingCharging": false,
+        "privateCharging": true
+      },
+      "hasPublicPolicy": false,
+      "budgetAmps": 10,
+      "vehicleSignalV": 9,
+      "connectTimeoutSec": 300,
+      "publicPolicy": {
+        "price": 0.39,
+        "sessionFee": 0.0,
+        "parkingPerHour": 2.0,
+        "graceMinutes": 10,
+        "graceFrom": "end",
+        "occupyPerHour": 6.0,
+        "validNow": true
+      },
+      "meter": {
+        "power": 0,
+        "energy": 0
+      },
+      "ocpp": {
+        "_status": [
+          "available",
+          "EVconnected",
+          "cennectEV",
+          "preparing",
+          "charging",
+          "suspendedEV",
+          "suspendedEVSE",
+          "faultedWithTransa",
+          "faultedWithoutTransa"
+        ],
+        "status": "faultedWithoutTransa"
+      },
+      "activeTx": null
+    }
+  ]
+}
