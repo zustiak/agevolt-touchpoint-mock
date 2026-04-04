@@ -52,7 +52,6 @@ Access a pricing:
 - `connector[].publicPolicy.policyEndUtc` (INIT)
 - `connector[].publicPolicy.withoutTimeSchedule` (INIT)
 - `connector[].publicPolicy.scheduleActiveNow` (INIT)
-- `connector[].publicPolicy.validNow` (INIT)
 - `connector[].publicPolicy.schedule[]` (INIT)
 
 Runtime charging/session:
