@@ -30,3 +30,8 @@ alwaysApply: true
 - Zoom must be treated as a first-class layout mode on every screen; each screen must be verified at `1x` and `2x` before done.
 - Reuse one shared overlay header pattern for all screens (`Späť` + centered title + right-aligned context box when needed); do not re-implement per screen.
 - Overlay header controls (`Späť`, title row, quick actions row) must keep stable geometry in zoom mode and must not scale like content cards.
+- Connector detail screen structure per state:
+  - First row always: connector identity bubble (parkingSpot | status label), clickable for dev status cycling.
+  - `available` / `EVconnected` (idle): Show Start (RFID hint) bubble + ConnectorAccessBubble (cycling preview of access modes).
+  - All other states: content below the identity row will be built incrementally per state; do not carry over old placeholder bubbles.
+- The "Voľný" idle detail layout is the reference pattern for new state-specific detail screens.

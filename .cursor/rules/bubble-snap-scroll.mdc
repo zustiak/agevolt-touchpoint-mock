@@ -1,0 +1,31 @@
+---
+description: BubbleSnapScroll — vertical snap scroll for stacked kiosk bubbles with FAB arrows
+alwaysApply: false
+---
+
+# BubbleSnapScroll
+
+Reusable component: `BubbleSnapScroll.tsx`.
+
+## When to use
+Stacked “bubbles” (cards) that may overflow vertically; keep a **sticky header outside** this component and put only scrollable bubbles **inside** `BubbleSnapScroll`.
+
+## Parent layout (required)
+The scroll port must have a **bounded height** or it will grow with content and never scroll:
+- Parent chain: `flex: 1` and `minHeight: 0` up to a fixed-height shell (e.g. station card).
+- Sibling before `BubbleSnapScroll` (identity row) stays natural height; `BubbleSnapScroll` gets `flex: 1` + `minHeight: 0` via its root `styles.port`.
+
+## Behaviour
+- Measures each child bubble height (`onLayout`), builds `snapToOffsets` for native snap (where supported).
+- **No system scrollbars** — matches kiosk UI; navigation uses FAB chevrons and touch scroll.
+- Large circular FAB chevrons (2× base size), **horizontally aligned** with bubble info icons (`connectorIdleRfidInfoIcon`: may overlap the “i”). Optional `fabRight` overrides alignment.
+- Arrow actions use `scrollTo({ animated: true })` toward the next/previous snap offset.
+
+## Integration
+Import `BubbleSnapScroll` and wrap bubble children only. Do not nest unrelated full-screen scrolls inside without testing.
+
+## Info / help (`InfoReader`)
+Single scroll block: one child `View` with inner `gap`, `fabRight={BUBBLE_SNAP_SCROLL_FAB_RIGHT_INFO}`. Scroll uses **viewport paging** when there is only one measured child (`snapOffsets.length < 2`).
+
+## Overlays (`FullscreenOverlay`)
+Enable with `bubbleSnapScroll` on `FullscreenOverlay` for screens like `Support` and `QR`, where stacked cards may overflow. Same FAB inset as Pomoc; body uses `overlayCard` / `overlayScrollContent` styles.

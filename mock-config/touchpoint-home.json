@@ -10,7 +10,8 @@
       "name": "Hotel Lesná"
     },
     "provider": {
-      "logo": "AGEVOLT"
+      "logo": "AGEVOLT",
+      "name": "AgeVolt"
     },
     "helpdeskNumber": "+421 911 000 111",
     "helpdeskEmail": "support@agevolt.sk",
@@ -32,7 +33,7 @@
     {
       "id": "c1",
       "evseCpoId": "SK*AGV*E1*20517*85*1",
-      "parkingSpot": "A12",
+      "parkingSpot": "A1222",
       "chargingLink": "https://charge.agevolt.com/start?connector=c1",
       "plugType": "Type 2 Outlet",
       "powerType": "AC",
@@ -45,6 +46,8 @@
         "privateCharging": false
       },
       "hasPublicPolicy": true,
+      "hasEroamingHubject": true,
+      "eroamingEmpList": ["Plugsurfing", "Shell Recharge", "EnBW mobility+"],
       "budgetAmps": 10,
       "vehicleSignalV": 12,
       "connectTimeoutSec": 300,
@@ -54,33 +57,38 @@
         "parkingPerHour": 2.5,
         "graceMinutes": 15,
         "graceFrom": "end",
-        "occupyPerHour": 8.0,
-        "validNow": true
+        "occupyPerHour": 8.0
       },
       "meter": {
         "power": 0,
-        "energy": 0
+        "energy": 15.42
       },
+      "txTotalSec": 3723,
+      "chargingActiveSec": 3600,
       "ocpp": {
         "_status": [
           "available",
           "EVconnected",
-          "cennectEV",
+          "connectEV",
           "preparing",
           "charging",
           "suspendedEV",
           "suspendedEVSE",
+          "suspended",
+          "finishing",
+          "disconnectEV",
           "faultedWithTransa",
-          "faultedWithoutTransa"
+          "faultedWithoutTransa",
+          "faulted"
         ],
-        "status": "available"
+        "status": "disconnectEV"
       },
       "activeTx": null
     },
     {
       "id": "c2",
       "evseCpoId": "SK*AGV*E1*20517*85*2",
-      "parkingSpot": "P9",
+      "parkingSpot": "P9999",
       "chargingLink": "https://charge.agevolt.com/start?connector=c2",
       "plugType": "Type 2 Outlet",
       "powerType": "AC",
@@ -102,8 +110,7 @@
         "parkingPerHour": 2.0,
         "graceMinutes": 10,
         "graceFrom": "end",
-        "occupyPerHour": 6.0,
-        "validNow": true
+        "occupyPerHour": 6.0
       },
       "meter": {
         "power": 0,
@@ -113,13 +120,17 @@
         "_status": [
           "available",
           "EVconnected",
-          "cennectEV",
+          "connectEV",
           "preparing",
           "charging",
           "suspendedEV",
           "suspendedEVSE",
+          "suspended",
+          "finishing",
+          "disconnectEV",
           "faultedWithTransa",
-          "faultedWithoutTransa"
+          "faultedWithoutTransa",
+          "faulted"
         ],
         "status": "faultedWithoutTransa"
       },

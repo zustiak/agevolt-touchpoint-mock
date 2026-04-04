@@ -1,6 +1,9 @@
 import type { ReactNode } from 'react';
-import { StyleSheet, View, useWindowDimensions } from 'react-native';
+import { Platform, StyleSheet, View, useWindowDimensions, type ViewStyle } from 'react-native';
 import { KIOSK_HEIGHT, KIOSK_WIDTH } from './kioskSpec';
+
+const KIOSK_NO_SELECT_WEB: ViewStyle =
+  Platform.OS === 'web' ? ({ userSelect: 'none', WebkitUserSelect: 'none' } as ViewStyle) : {};
 
 type Props = {
   children: ReactNode;
@@ -16,16 +19,17 @@ export function KioskViewport({ children }: Props) {
   const topCompensation = -((KIOSK_HEIGHT * (1 - scale)) / 2);
 
   return (
-    <View style={styles.backdrop}>
+    <View style={[styles.backdrop, KIOSK_NO_SELECT_WEB]}>
       <View
         style={[
           styles.deviceShell,
+          KIOSK_NO_SELECT_WEB,
           {
             transform: [{ translateY: topCompensation }, { scale }],
           },
         ]}
       >
-        <View style={styles.inner}>{children}</View>
+        <View style={[styles.inner, KIOSK_NO_SELECT_WEB]}>{children}</View>
       </View>
     </View>
   );
@@ -34,7 +38,7 @@ export function KioskViewport({ children }: Props) {
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: '#d4d4d4',
+    backgroundColor: '#ffffff',
     alignItems: 'center',
     justifyContent: 'flex-start',
     paddingTop: 8,

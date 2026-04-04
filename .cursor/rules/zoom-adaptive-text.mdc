@@ -1,0 +1,60 @@
+---
+description: ZoomAdaptiveText and FitText layout stability rules to prevent oscillation and shrinking bugs
+alwaysApply: true
+---
+
+# ZoomAdaptiveText / FitText Layout Rules
+
+## Core Principle
+`ZoomAdaptiveText` measures its wrapper View width via `onLayout`, then calculates font size to fit. If the wrapper width depends on the text content, a feedback loop occurs: measure → render → layout changes → re-measure → different size → oscillation or progressive shrinking.
+
+## Mandatory: Parent Must Provide Stable Width
+Every `ZoomAdaptiveText` (and `FitText`, which delegates to it) **must** live inside a parent whose width is determined by layout constraints, NOT by content. Valid parent patterns:
+
+- `flex: 1` in a **row** parent (takes remaining horizontal space)
+- `width: '100%'` or `width: <fixed>` (explicit width)
+- `alignSelf: 'stretch'` in a **column** parent (stretches to parent's width)
+
+## Critical: Row vs Column Direction
+`alignSelf: 'stretch'` behaves differently based on parent's `flexDirection`:
+- **Column parent** (default): `stretch` expands the child **horizontally** → stable width ✓
+- **Row parent**: `stretch` expands the child **vertically** → width is still content-dependent → oscillation ✗
+
+When placing `ZoomAdaptiveText` inside a `flexDirection: 'row'` parent:
+- Give the text style `flex: 1` so the wrapper fills remaining row space
+- OR change the parent to column direction if it has only one child
+
+## Style Prop Forwarding
+`ZoomAdaptiveText` copies `flex`, `flexGrow`, `flexShrink`, `alignSelf`, `minWidth`, `maxWidth`, `width` from the text style to the wrapper View. If a style has `flex: 1`, the wrapper gets `flex: 1`. Only use `flex: 1` on text styles that are **exclusively** inside row parents. If the same style is used in both row and column contexts, do NOT add `flex` — fix the parent instead.
+
+## Do NOT Use Content-Sized Wrappers
+Never wrap `ZoomAdaptiveText` in a View that has no explicit width, flex, or stretch. Examples of bad patterns:
+```
+// BAD: wrapper width depends on content
+<View style={{ alignItems: 'center' }}>
+  <FitText ...>text</FitText>
+</View>
+
+// GOOD: wrapper fills parent
+<View style={{ alignItems: 'center', width: '100%' }}>
+  <FitText ...>text</FitText>
+</View>
+```
+
+## Safety Margin
+`measureTextPx` includes a 2% safety margin to prevent off-by-one-pixel wrapping where Canvas measurement is slightly optimistic vs actual rendering.
+
+## Re-measure Threshold
+`onLayout` only triggers state updates when width changes by ≥ 2px (via `useRef` + threshold check). This prevents sub-pixel fluctuations from causing re-renders.
+
+## Word Wrapping
+`ZoomAdaptiveText` never breaks mid-word. It uses `wordWrap()` which splits only at spaces, and `wordBreak: 'keep-all'` on web. `numberOfLines` is set to `bestLines.length` to prevent the browser from adding unexpected line breaks.
+
+## FullscreenOverlay titles (`styles.overlayTitle` + `overlayTitleFillRow`)
+Titles sit in `flexDirection: 'row'` next to back strip / icon / spacer. **`flex: 1` + `minWidth: 0` on the title must apply at 1× zoom**, not only when magnifier is on — same pattern as `infoReaderHeaderTitle` (always `flex: 1`). Otherwise `ZoomAdaptiveText` gets content-sized width and shrinks the font.
+
+## Checklist Before Using FitText / ZoomAdaptiveText
+1. Is the parent's width stable (not content-dependent)?
+2. If parent is `flexDirection: 'row'`, does the text style have `flex: 1`?
+3. Is the text style with `flex: 1` used ONLY in row contexts (not shared with column contexts)?
+4. Does the parent chain all the way up have stable widths (no content-sized intermediaries)?
