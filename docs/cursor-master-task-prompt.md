@@ -58,13 +58,13 @@ PREFEROVANE KLUCOVE PREMENNE:
 - meter/status: `connector[].meter.*`, `connector[].ocpp.status`
 
 STAVY:
-- available, preparing, charging, suspended, finishing, faulted
+- available, EVconnected, connectEV, preparing, charging, suspendedEV, suspendedEVSE, disconnectEV, faultedWithTransa, faultedWithoutTransa
 
 PRAVIDLA STAVOV:
 - accepted start -> preparing
 - ak do 5:00 nezacne prve realne charging -> zrusit transakciu
-- po prvom charging sa neskorsia pauza zobrazi ako suspended (nie preparing)
-- stop request ide do finishing a az potom available
+- po prvom charging sa neskorsia pauza zobrazi ako suspendedEV / suspendedEVSE (nie preparing)
+- stop request -> navrat na available (bez samostatneho stavu finishing v UI)
 
 POVINNE SCREENY:
 1. Home / Connector Overview

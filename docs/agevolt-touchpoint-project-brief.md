@@ -131,15 +131,14 @@ Pouzivane stavy:
 - `available`
 - `preparing`
 - `charging`
-- `suspended`
-- `finishing`
-- `faulted`
+- `suspendedEV`, `suspendedEVSE`, `disconnectEV`
+- `faultedWithTransa`, `faultedWithoutTransa`
 
 Pravidla:
 - accepted start -> `preparing`,
 - ak do 5:00 nenastane prve realne charging -> zrusit transakciu, navrat na `available`,
-- po prvom realnom charging uz pri pauze pouzit `suspended` (nie `preparing`),
-- stop request -> `finishing` -> az potom `available`.
+- po prvom realnom charging uz pri pauze pouzit `suspendedEV` / `suspendedEVSE` (nie `preparing`),
+- stop request -> navrat na `available` (bez samostatneho stavu `finishing` v UI).
 
 ## 8) UX pravidla pre access a pricing
 
@@ -175,6 +174,6 @@ Na presne mapovanie premennych a source-of-truth pravidiel pouzi:
 Najdolezitejsie body z excelu:
 - Priorita zdrojov pre `INIT + OCPP_KEY`: OCPP_KEY ma prednost.
 - Remote start/stop sa po akceptovani napaja na rovnaky lokalny TX state machine ako lokalne akcie.
-- `preparing` je iba pred prvym realnym charging; potom pri pauze patri stav `suspended`.
-- Stop nie je okamzity koniec: najprv wait safe state, potom `finishing`, az potom `available`.
+- `preparing` je iba pred prvym realnym charging; potom pri pauze patri stav `suspendedEV` alebo `suspendedEVSE`.
+- Stop nie je okamzity koniec: najprv wait safe state, potom navrat na `available` (v mock UI bez stavu `finishing`).
 - Per-connector data model je potvrdeny (`connector[].*` pre status, pricing, tx, meter).

@@ -10,12 +10,11 @@ const OVERVIEW_STATUS_KEYS: Record<ConnectorStatus, string> = {
   suspendedEV: 'connector.overviewStatus.suspendedEV',
   suspendedEVSE: 'connector.overviewStatus.suspendedEVSE',
   disconnectEV: 'connector.overviewStatus.disconnectEV',
-  suspended: 'connector.overviewStatus.suspended',
-  finishing: 'connector.overviewStatus.finishing',
   faultedWithTransa: 'connector.overviewStatus.faultedWithTransa',
   faultedWithoutTransa: 'connector.overviewStatus.faultedWithoutTransa',
-  faulted: 'connector.overviewStatus.faulted',
 };
+
+const VALID_CONNECTOR_STATUSES = new Set<string>(Object.keys(OVERVIEW_STATUS_KEYS));
 
 const ACTIVE_TX_STATUSES = new Set<ConnectorStatus>([
   'connectEV',
@@ -23,9 +22,7 @@ const ACTIVE_TX_STATUSES = new Set<ConnectorStatus>([
   'charging',
   'suspendedEV',
   'suspendedEVSE',
-  'suspended',
   'faultedWithTransa',
-  'finishing',
 ]);
 
 export const MOCK_CONNECTOR_STATUS_CYCLE: ConnectorStatus[] = [
@@ -36,16 +33,31 @@ export const MOCK_CONNECTOR_STATUS_CYCLE: ConnectorStatus[] = [
   'charging',
   'suspendedEV',
   'suspendedEVSE',
-  'suspended',
-  'finishing',
   'disconnectEV',
   'faultedWithTransa',
   'faultedWithoutTransa',
-  'faulted',
 ];
 
 export function getConnectorOverviewStatusLabel(lang: LanguageCode, status: ConnectorStatus): string {
   return t(lang, OVERVIEW_STATUS_KEYS[status]);
+}
+
+/** Legacy strings (removed states) and unknown values → safe runtime status. */
+export function normalizeConnectorStatus(raw: string | null | undefined): ConnectorStatus {
+  if (raw == null || raw === 'finishing') return 'available';
+  if (raw === 'suspended') return 'suspendedEVSE';
+  if (raw === 'faulted') return 'faultedWithoutTransa';
+  if (VALID_CONNECTOR_STATUSES.has(raw)) return raw as ConnectorStatus;
+  return 'available';
+}
+
+export function nextMockConnectorStatus(current: ConnectorStatus): ConnectorStatus {
+  const cur = normalizeConnectorStatus(current);
+  let idx = MOCK_CONNECTOR_STATUS_CYCLE.indexOf(cur);
+  if (idx < 0) idx = 0;
+  const len = MOCK_CONNECTOR_STATUS_CYCLE.length;
+  const nextIdx = (idx + 1) % len;
+  return MOCK_CONNECTOR_STATUS_CYCLE[nextIdx];
 }
 
 export function isTxActiveStatus(status: ConnectorStatus): boolean {
@@ -61,7 +73,7 @@ export function isFinishedByVehicleStatus(status: ConnectorStatus): boolean {
 }
 
 export function isBlockedByStationStatus(status: ConnectorStatus): boolean {
-  return status === 'suspendedEVSE' || status === 'suspended';
+  return status === 'suspendedEVSE';
 }
 
 export function isFaultWithTransactionStatus(status: ConnectorStatus): boolean {
@@ -69,9 +81,22 @@ export function isFaultWithTransactionStatus(status: ConnectorStatus): boolean {
 }
 
 export function isFaultWithoutTransactionStatus(status: ConnectorStatus): boolean {
-  return status === 'faultedWithoutTransa' || status === 'faulted';
+  return status === 'faultedWithoutTransa';
 }
 
 export function isConnectorSessionVehicleBubbleStatus(status: ConnectorStatus): boolean {
-  return ACTIVE_TX_STATUSES.has(status) && status !== 'finishing';
+  return ACTIVE_TX_STATUSES.has(status);
+}
+
+/**
+ * Stavy konektora, v ktorých je v RFID modáli stanice povolený **Štart**.
+ * Povolené len pre idle stavy (Voľný, Vozidlo pripojené), nie pre summary po ukončení TX.
+ */
+export const RFID_STATION_MODAL_STARTABLE_STATUSES = new Set<ConnectorStatus>([
+  'available',
+  'EVconnected',
+]);
+
+export function isRfidStationModalStartableStatus(status: ConnectorStatus): boolean {
+  return RFID_STATION_MODAL_STARTABLE_STATUSES.has(normalizeConnectorStatus(status));
 }

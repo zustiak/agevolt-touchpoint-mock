@@ -1,0 +1,106 @@
+[
+  {
+    "path": "app.config.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/navigation/constants.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/navigation/types.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/reduxStore/slices/mainSlice.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/reduxStore/slices/types.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/services/tpVariables/types.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/services/connectivity/constants.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/Home/tpClient.tsx",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/Support/index.tsx",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/Settings/index.tsx",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/Settings/General/index.tsx",
+    "kind": "manifest_only"
+  },
+  {
+    "path": "src/screens/Settings/General/tpClient.tsx",
+    "kind": "manifest_only"
+  },
+  {
+    "path": "src/screens/Settings/Integrations/index.tsx",
+    "kind": "manifest_only"
+  },
+  {
+    "path": "src/screens/Settings/Integrations/tpClient.tsx",
+    "kind": "manifest_only"
+  },
+  {
+    "path": "src/screens/Settings/Integrations/tpClientScreenUtils.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/Settings/Mqtt/index.tsx",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/Browser/index.tsx",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/FirmwareUpdate/index.tsx",
+    "kind": "manifest_only"
+  },
+  {
+    "path": "src/screens/FirmwareUpdate/useFirmwareUpdate.ts",
+    "kind": "manifest_only"
+  },
+  {
+    "path": "src/screens/FirmwareUpdate/types.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/ConnectorsConfig/index.tsx",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/ConnectorsConfig/useConnectorsConfig.ts",
+    "kind": "manifest_only"
+  },
+  {
+    "path": "src/screens/ConnectorsConfig/types.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/ConnectorsConfig/utils.ts",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/ConnectorsConfig/ConnectorConfigPanel/index.tsx",
+    "kind": "exact"
+  },
+  {
+    "path": "src/screens/ConnectorsConfig/ConnectorConfigPanel/utils.ts",
+    "kind": "exact"
+  }
+]

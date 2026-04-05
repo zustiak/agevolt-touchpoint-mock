@@ -17,13 +17,16 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Image,
+  Linking,
   Modal,
   Platform,
   Pressable,
   Text as RNTextBase,
   ScrollView,
   StyleSheet,
+  TextInput,
   useWindowDimensions,
   View,
   type LayoutChangeEvent,
@@ -49,23 +52,91 @@ import {
   isFaultWithoutTransactionStatus,
   isFinishedByVehicleStatus,
   isTxActiveStatus,
-  MOCK_CONNECTOR_STATUS_CYCLE,
+  nextMockConnectorStatus,
+  normalizeConnectorStatus,
 } from './connectorStatus';
 import { KioskViewport } from './KioskViewport';
 import { KIOSK_WIDTH, SCREEN_SCROLL_VERTICAL } from './kioskSpec';
+import {
+  SERVICE_PIN,
+  SERVICE_PIN_LENGTH,
+  TRANSACTION_SESSION_PIN,
+  TRANSACTION_SESSION_PIN_LENGTH,
+} from './serviceMenu/pins';
 import { LocalQrCode } from './LocalQrCode';
+import {
+  buildStationConnectorDecision,
+  findRfidAccountByCredentials,
+  findVehicleById,
+  getSpacesForStationAccount,
+  getStationCardSnapshot,
+  isTxAuthorizedForRfidUid,
+} from './rfidStationLogic';
+import type {
+  ConnectorRfidAccountPolicy,
+  MockAccount,
+  MockRfidCard,
+  MockSpace,
+  MockVehicle,
+  StationCardAccessMode,
+  StationCardSnapshot,
+  StationConnectorDecision,
+} from './rfidStationTypes';
+
+function formatVehicleOneLine(v: { plate: string; name?: string }): string {
+  const p = (v.plate ?? '').trim();
+  const n = (v.name ?? '').trim();
+  if (p.length > 0 && n.length > 0) return `${p} | ${n}`;
+  if (n.length > 0) return n;
+  return p;
+}
+
+type StationVehicleUi = { kind: 'vehicle'; vehicleId: string } | { kind: 'without' };
 
 /** Web: žiadny výber textu myšou (klávesnica, štítky; Modaly mimo hlavného stromu). */
 const KIOSK_NO_SELECT_WEB: TextStyle =
   Platform.OS === 'web' ? ({ userSelect: 'none', WebkitUserSelect: 'none' } as TextStyle) : {};
 
-/** Web test: Ctrl+A / Ctrl+B = simulácia RFID (CustomEvent; session bublina: karta A = prihlásenie bez PIN). */
+/** Medzi dvoma klepnutiami na logo: ak je medzera dlhšia, počítadlo sa vynuluje (sekvencia 5× začína odznova). */
+const LOGO_SERVICE_TAP_GAP_MS = 5000;
+
+/** `Alert.alert` na webe nerobí nič (RN len iOS/Android). */
+function showKioskToastAlert(title: string, message?: string) {
+  const m = message?.trim() ?? '';
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined') {
+      window.alert(m ? `${title}\n\n${m}` : title);
+    }
+  } else {
+    Alert.alert(title, m || undefined);
+  }
+}
+
+/** Web test: Ctrl+A–D = simulácia RFID (CustomEvent). Presety konektorov v `applyDevRfidConnectorPresetForTag`. */
 const DEV_RFID_TAP_EVENT = 'agevolt-dev-rfid-tap';
-const DEV_RFID_TAG_CTRL_A = 'AABBCCDD';
-const DEV_RFID_TAG_CTRL_B = 'BBCCDDEEFFGG';
-/** OK: fajka, potom zatvorenie modálu (bez ďalšej ikony). */
-const RFID_TAP_OK_CHECK_MS = 720;
-const RFID_TAP_REJECT_MS = 1000;
+/** Známa aktívna, TX na ľavom konektore (charging, linkedCardUid = táto karta). */
+const DEV_RFID_TAG_CTRL_A = 'TESTCTRL_AA';
+/** Známa aktívna, žiadna TX priradená tejto karte (iná karta nabíja vpravo). */
+const DEV_RFID_TAG_CTRL_B = 'TESTCTRL_BB';
+/** Známa blokovaná, bez TX. */
+const DEV_RFID_TAG_CTRL_C = 'TESTCTRL_CC';
+/** Neznáma karta. */
+const DEV_RFID_TAG_CTRL_D = 'TESTCTRL_DD';
+const DEV_RFID_TEST_TAGS = new Set([
+  DEV_RFID_TAG_CTRL_A,
+  DEV_RFID_TAG_CTRL_B,
+  DEV_RFID_TAG_CTRL_C,
+  DEV_RFID_TAG_CTRL_D,
+]);
+/** Dĺžka zobrazenia fajky / zamietnutia pred začatím fade-outu (simulácia priloženia karty). */
+const RFID_TAP_FEEDBACK_SHOW_MS = 2000;
+/** Musí pokrývať `animationType="fade"` na modále — inak zmizne ikona skôr než overlay a ostane prázdny rámček. */
+const RFID_MODAL_FADE_OUT_MS = 320;
+/** Po úplnom zhasnutí modálu ešte nepúšťať ďalšie priloženie (Ctrl+A–D). */
+const RFID_TAP_POST_MODAL_COOLDOWN_MS = 1000;
+/** Predvyplnenie pri kroku „Prihlásiť do konta“ — zodpovedá `acc-jozef` v mock konfigurácii. */
+const STATION_RFID_PREFILL_LOGIN = 'jozef';
+const STATION_RFID_PREFILL_PASSWORD = 'heslo123';
 
 /** Jeden kontext + `resume()` pred každým beepom — nový AudioContext pri každom tuku často ostane `suspended` a zvuk neznie. */
 let rfidTapAudioContext: AudioContext | null = null;
@@ -130,10 +201,22 @@ type Screen =
   | 'info'
   | 'qr'
   | 'servicePin'
-  | 'serviceMenu'
-  | 'serviceL1'
-  | 'serviceL2'
-  | 'serviceL3';
+  | 'serviceSettings'
+  | 'serviceSystem'
+  | 'serviceConnections'
+  | 'serviceStation'
+  | 'serviceOperator'
+  | 'serviceOcppConfig'
+  | 'serviceFirmware'
+  | 'serviceConnectors'
+  | 'serviceConnectorOverview'
+  | 'serviceConnectorEvm'
+  | 'serviceConnectorEvmManual'
+  | 'serviceConnectorElm'
+  | 'serviceConnectorOcpp'
+  | 'serviceConnectorPolicy'
+  | 'serviceConnectorTx'
+  | 'serviceBrowser';
 
 const CONNECTOR_IDLE_SCREENS: Screen[] = ['home', 'language', 'support', 'info', 'qr'];
 
@@ -180,11 +263,18 @@ type ActiveTx = {
   pricePerKwh?: number | null;
   /** Z BE: ďalšie poplatky (session, parkovanie, …). Ak chýba, odvodí sa z `publicPolicy`. */
   hasAdditionalFees?: boolean;
+  /** RFID tag ktorý spustil TX (autorizácia v modáli). */
+  rfidTag?: string | null;
+  /** Nadradený tag (pool) pri TX. */
+  parentTag?: string | null;
+  linkedCardUid?: string | null;
+  accountId?: string | null;
+  vehicleId?: string | null;
+  vehiclePlate?: string | null;
+  vehicleName?: string | null;
+  driverEmail?: string | null;
+  accessMode?: StationCardAccessMode | 'eroaming' | null;
 };
-
-/** Mock PIN (4 číslice): servisné menu aj prihlásenie k session (PIN transakcie). */
-const SERVICE_PIN_LENGTH = 4;
-const SERVICE_PIN = '1234';
 
 type TpConnector = {
   id: string;
@@ -214,6 +304,7 @@ type TpConnector = {
   chargingActiveSec?: number;
   meter: { power: number; energy: number };
   ocpp: { status: ConnectorStatus; _status?: ConnectorStatus[] };
+  rfidAccountPolicies?: ConnectorRfidAccountPolicy[];
   activeTx: ActiveTx | null;
 };
 
@@ -243,8 +334,12 @@ type TouchpointMockConfig = {
     networkOnline?: boolean;
     networkType?: NetworkType;
   };
+  rfidCards: MockRfidCard[];
+  accounts: MockAccount[];
   connectors: TpConnector[];
 };
+
+type StationRfidStep = 'summary' | 'login' | 'pickSpace' | 'pickVehicle' | 'createVehicle' | 'confirmLink';
 
 const mockConfig = require('./mock-config/touchpoint-home.json') as TouchpointMockConfig;
 const AGEVOLT_LOGO = require('./assets/branding/agevolt-logo.png');
@@ -254,8 +349,416 @@ const faProSolid = require('@fortawesome/pro-solid-svg-icons') as Record<string,
 const faProRegular = require('@fortawesome/pro-regular-svg-icons') as Record<string, IconDefinition>;
 
 const LANGUAGES: LanguageCode[] = ['SK', 'EN', 'DE', 'DEV'];
+const SERVICE_LANGUAGE_OPTIONS: Exclude<LanguageCode, 'DEV'>[] = ['SK', 'EN', 'DE'];
+const SERVICE_OCPP_MEASURAND_OPTIONS = [
+  'Energy.Active.Export.Register',
+  'Energy.Active.Import.Register',
+  'Energy.Reactive.Export.Register',
+  'Energy.Reactive.Import.Register',
+  'Energy.Active.Export.Interval',
+  'Energy.Active.Import.Interval',
+  'Energy.Reactive.Export.Interval',
+  'Energy.Reactive.Import.Interval',
+  'Power.Active.Export',
+  'Power.Active.Import',
+  'Power.Offered',
+  'Power.Reactive.Export',
+  'Power.Reactive.Import',
+  'Power.Factor',
+  'Current.Import',
+  'Current.Export',
+  'Current.Offered',
+  'Voltage',
+  'Frequency',
+  'Temperature',
+  'SoC',
+  'RPM',
+] as const;
+const SERVICE_CONNECTOR_PHASE_ROTATION_OPTIONS = [
+  'NotApplicable',
+  'Unknown',
+  'RST',
+  'RTS',
+  'SRT',
+  'STR',
+  'TRS',
+  'TSR',
+] as const;
+const SERVICE_SK_FIELD_LABELS: Record<string, string> = {
+  'system.model': 'Model',
+  'system.product': 'Produkt',
+  'system.deviceId': 'Device ID',
+  'system.tpLifecycleState': 'Stav Touchpointu',
+  'system.online': 'Internet',
+  'system.activeNetwork': 'Aktívna sieť',
+  'system.dataMetered': 'Spoplatnená sieť',
+  'system.cellular.internet': 'Dáta',
+  'system.wifi.internet': 'Wi-Fi',
+  'system.ethernet.internet': 'ETH',
+  'system.ocppConnected': 'OCPP online',
+  'system.mqttConnected': 'MQTT online',
+  'system.rs485ready': 'RS485 ready',
+  'system.stat.net.totalRxBytes': 'RX celkom',
+  'system.stat.net.totalTxBytes': 'TX celkom',
+  'system.stat.net.totalRxBytesLast': 'RX od bootu',
+  'system.stat.net.totalTxBytesLast': 'TX od bootu',
+  'system.location.point': 'Poloha',
+  'connectivity.mqtt.url': 'URL',
+  'connectivity.mqtt.topicPublish': 'Publish topic',
+  'connectivity.mqtt.topicSubscribe': 'Subscribe topic',
+  'connectivity.mqtt.connectionId': 'Connection ID',
+  'connectivity.mqtt.deviceId': 'Device ID',
+  'connectivity.mqtt.user': 'User',
+  'connectivity.mqtt.password': 'Password',
+  'connectivity.ocpp.version': 'Verzia',
+  'connectivity.ocpp.url': 'URL',
+  'connectivity.ocpp.deviceId': 'Device ID',
+  'connectivity.ocpp.basicAuth': 'Basic auth',
+  'connectivity.ocpp.registrationAccepted': 'Registrácia OK',
+  'connectivity.ocpp.serverTimeOffsetMs': 'Offset času',
+  'connectivity.ocpp.heartbeatIntervalSec': 'Heartbeat',
+  'connectivity.ocpp.bootRetryIntervalSec': 'Boot retry',
+  'system.stationBound': 'Stanica naviazaná',
+  'station.boundSn': 'SN',
+  'station.vendor': 'Výrobca',
+  'station.model': 'Model',
+  'station.country': 'Krajina',
+  'station.defaultLanguage': 'Jazyk',
+  'station.timeZone': 'Časová zóna',
+  'station.currency': 'Mena',
+  'station.fxToEurRate': 'Kurz EUR',
+  'station.vatRate': 'DPH',
+  'station.modbusMeter': 'Modbus meter',
+  'station.meterS0count': 'S0 count',
+  'operator.paymentAllowed': 'Platby kartou',
+  'operator.owner.name': 'Prevádzkovateľ',
+  'operator.helpdeskNumber': 'Helpdesk',
+  'operator.appleStoreLink': 'Apple Store',
+  'operator.androidStoreLink': 'Google Play',
+  'operator.chargingLink': 'Charging link',
+  'connectivity.ocpp.key.AllowOfflineTxForUnknownId': 'Unknown ID offline',
+  'connectivity.ocpp.key.AuthorizationCacheEnabled': 'Auth cache',
+  'connectivity.ocpp.key.AuthorizeRemoteTxRequests': 'Remote auth',
+  'connectivity.ocpp.key.LocalAuthorizeOffline': 'Offline auth',
+  'connectivity.ocpp.key.LocalPreAuthorize': 'Pre-auth',
+  'connectivity.ocpp.key.LocalAuthListEnabled': 'Local auth list',
+  'connectivity.ocpp.key.LocalAuthListMaxLength': 'Local list max',
+  'connectivity.ocpp.key.SendLocalListMaxLength': 'SendLocalList max',
+  'connectivity.ocpp.key.MaxEnergyOnInvalidId': 'Max energia invalid ID',
+  'connectivity.ocpp.key.StopTransactionOnInvalidId': 'Stop na invalid ID',
+  'connectivity.ocpp.key.BlinkRepeat': 'Blink repeat',
+  'connectivity.ocpp.key.ClockAlignedDataInterval': 'Clock aligned',
+  'connectivity.ocpp.key.ConnectionTimeOut': 'Connect timeout',
+  'connectivity.ocpp.key.GetConfigurationMaxKeys': 'GetConfig max',
+  'connectivity.ocpp.key.HeartbeatInterval': 'Heartbeat',
+  'connectivity.ocpp.key.LightIntensity': 'LED intenzita',
+  'connectivity.ocpp.key.MeterValueSampleInterval': 'Sample interval',
+  'connectivity.ocpp.key.MinimumStatusDuration': 'Min. status',
+  'connectivity.ocpp.key.ResetRetries': 'Reset retries',
+  'connectivity.ocpp.key.TransactionMessageAttempts': 'TX attempts',
+  'connectivity.ocpp.key.TransactionMessageRetryInterval': 'TX retry',
+  'connectivity.ocpp.key.WebSocketPingInterval': 'WS ping',
+  'connectivity.ocpp.key.MeterValuesAlignedData': 'Aligned data',
+  'connectivity.ocpp.key.MeterValuesAlignedDataMaxLength': 'Aligned max',
+  'connectivity.ocpp.key.MeterValuesSampledData': 'Sampled data',
+  'connectivity.ocpp.key.MeterValuesSampledDataMaxLength': 'Sampled max',
+  'connectivity.ocpp.key.StopTxnAlignedData': 'Stop aligned',
+  'connectivity.ocpp.key.StopTxnAlignedDataMaxLength': 'Stop aligned max',
+  'connectivity.ocpp.key.StopTxnSampledData': 'Stop sampled',
+  'connectivity.ocpp.key.StopTxnSampledDataMaxLength': 'Stop sampled max',
+  'connectivity.ocpp.key.NumberOfConnectors': 'Počet konektorov',
+  'connectivity.ocpp.key.ConnectorPhaseRotationMaxLength': 'Phase rot. max',
+  'connectivity.ocpp.key.StopTransactionOnEVSideDisconnect': 'Stop po odpojení EV',
+  'connectivity.ocpp.key.UnlockConnectorOnEVSideDisconnect': 'Unlock po odpojení',
+  'connectivity.ocpp.key.SupportedFeatureProfiles': 'Feature profily',
+  'connectivity.ocpp.key.SupportedFeatureProfilesMaxLength': 'Profiles max',
+  'connectivity.ocpp.key.ReserveConnectorZeroSupported': 'Reserve 0',
+  'connectivity.ocpp.key.ChargeProfileMaxStackLevel': 'Profile stack',
+  'connectivity.ocpp.key.ChargingScheduleAllowedChargingRateUnit': 'Rate unit',
+  'connectivity.ocpp.key.ChargingScheduleMaxPeriods': 'Schedule max',
+  'connectivity.ocpp.key.ConnectorSwitch3to1PhaseSupported': '3->1 phase',
+  'connectivity.ocpp.key.MaxChargingProfilesInstalled': 'Profiles max count',
+  'system.fwUpdate.status': 'Stav',
+  'system.fwUpdate.fileVersion': 'Verzia súboru',
+  'system.fwUpdate.moduleProgress': 'Priebeh',
+  'firmware.fileName': 'Súbor',
+  'firmware.sendState': 'Odosielanie',
+  'connector[].evseCpoId': 'EVSE ID',
+  'connector[].powerType': 'Typ výkonu',
+  'connector[].plugType': 'Konektor',
+  'connector[].maxAmps': 'Max prúd',
+  'connector[].parkingSpot': 'Miesto',
+  'connector[].evm.state': 'Stav EVM',
+  'connector[].meter.state': 'Stav meter',
+  'connector[].ocpp.status': 'OCPP stav',
+  'connector[].activeTx.id': 'TX ID',
+  'connector[].evm.manual.enabled': 'Manual',
+  'connector[].hasPublicPolicy': 'Public policy',
+  'connector[].hasEroamingHubject': 'Hubject',
+  'connector[].phases': 'Fázy',
+  'connector[].publicPolicy.validNow': 'Policy now',
+  'connector[].publicPolicy.price': 'Cena',
+  'connector[].publicPolicy.validTo': 'Platí do',
+  'connector[].evm.lastResponse': 'Posl. odpoveď',
+  'connector[].evm.budget': 'Budget',
+  'connector[].evm.rcdEnabled': 'RCD',
+  'connector[].evm.permanentLock': 'Permanent lock',
+  'connector[].evm.fw.version': 'FW verzia',
+  'connector[].evm.hwAddress': 'HW adresa',
+  'connector[].evm.cibEnabled': 'CIB',
+  'connector[].evm.cpV': 'CP V',
+  'connector[].evm.rcdErr': 'RCD chyba',
+  'connector[].evm.do1': 'DO1',
+  'connector[].evm.do2': 'DO2',
+  'connector[].evm.lock': 'Lock',
+  'connector[].evm.manual.budget': 'Manual budget',
+  'connector[].evm.manual.do1': 'Manual DO1',
+  'connector[].evm.manual.do2': 'Manual DO2',
+  'connector[].evm.manual.lock': 'Manual lock',
+  'connector[].evm.manual.ignoreRcd': 'Ignore RCD',
+  'connector[].meter.lastResponse': 'Posl. odpoveď',
+  'connector[].meter.energy': 'Energia',
+  'connector[].meter.energy.phase[]': 'Energia fázy',
+  'connector[].meter.voltage.phase[]': 'Napätie fázy',
+  'connector[].meter.power': 'Výkon',
+  'connector[].meter.power.phase[]': 'Výkon fázy',
+  'connector[].meter.current.phase[]': 'Prúd fázy',
+  'connector[].meter.countImp': 'Impulzy',
+  'connector[].meter.countImpLast': 'Impulzy last',
+  'connector[].ocpp.statusLastSent': 'Posl. odoslaný',
+  'connector[].ocpp.statusChangedAt': 'Zmena od',
+  'connector[].eroamingEmpList': 'EMP list',
+  'connector[].publicPolicy.policyEndUtc': 'Policy end',
+  'connector[].publicPolicy.withoutTimeSchedule': 'Bez schedule',
+  'connector[].publicPolicy.scheduleActiveNow': 'Schedule now',
+  'connector[].publicPolicy.schedule[]': 'Schedule',
+  'connector[].activeTx.hasReachedCharging': 'Prešlo do charge',
+  'connector[].activeTx.meterValueStartWh': 'Meter start',
+  'connector[].activeTx.meterValueEndWh': 'Meter end',
+  'connector[].activeTx.tagId': 'Tag',
+  'connector[].activeTx.userId': 'User',
+  'connector[].activeTx.avPolicyType': 'Policy typ',
+  'connector[].activeTx.priceMeta': 'Price meta',
+  'connector[].activeTx.chargingTime': 'Čas nabíjania',
+  'connector[].activeTx.suspendedByUserTime': 'Pauza user',
+  'connector[].activeTx.vatRate': 'DPH',
+  'connector[].activeTx.costWithVat': 'Cena s DPH',
+  'connector[].activeTx.chargingStartTs': 'Štart',
+  'connector[].activeTx.chargingEndTs': 'Koniec',
+};
+type ServiceConnectorSubscreen =
+  | 'serviceConnectorOverview'
+  | 'serviceConnectorEvm'
+  | 'serviceConnectorEvmManual'
+  | 'serviceConnectorElm'
+  | 'serviceConnectorOcpp'
+  | 'serviceConnectorPolicy'
+  | 'serviceConnectorTx';
+type ServiceConnectorState = {
+  evmLastResponse: string;
+  evmBudget: number;
+  evmRcdEnabled: boolean;
+  evmPermanentLock: boolean;
+  evmManualEnabled: boolean;
+  evmManualBudget: number;
+  evmManualDo1: boolean;
+  evmManualDo2: boolean;
+  evmManualLock: boolean;
+  evmManualIgnoreRcd: boolean;
+  evmFwVersion: number;
+  evmHwAddress: string;
+  evmCibEnabled: boolean;
+  evmCpV: number;
+  evmRcdErr: boolean;
+  evmDo1: boolean;
+  evmDo2: boolean;
+  evmLock: boolean;
+  evmState: 'COM_ERR' | 'INIT' | 'FW_UPDATE' | 'MANUAL' | 'AVAILABLE';
+  publicPolicyValidNow: boolean;
+  publicPolicyValidTo: string;
+  publicPolicyPolicyEndUtc: string;
+  publicPolicyWithoutTimeSchedule: boolean;
+  publicPolicyScheduleActiveNow: boolean;
+  publicPolicySchedule: string[];
+  meterLastResponse: string;
+  meterEnergy: number;
+  meterEnergyPhase: number[];
+  meterVoltagePhase: number[];
+  meterPower: number;
+  meterPowerPhase: number[];
+  meterCurrentPhase: number[];
+  meterCountImp: number;
+  meterCountImpLast: number;
+  meterState: 'COM_ERR' | 'AVAILABLE' | 'UNAVAILABLE';
+  ocppStatusLastSent: string;
+  ocppStatusChangedAt: string;
+  activeTxHasReachedCharging: boolean;
+  activeTxMeterValueStartWh: number;
+  activeTxMeterValueEndWh: number;
+  activeTxTagId: string;
+  activeTxUserId: string;
+  activeTxAvPolicyType: string;
+  activeTxPriceMeta: Record<string, unknown>;
+  activeTxChargingTime: string;
+  activeTxSuspendedByUserTime: string;
+  activeTxVatRate: number;
+  activeTxCostWithVat: number;
+  activeTxChargingStartTs: string;
+  activeTxChargingEndTs: string | null;
+  connectorPhaseRotation: (typeof SERVICE_CONNECTOR_PHASE_ROTATION_OPTIONS)[number];
+};
 const ContentTextScaleContext = createContext(1);
 const ContentIconScaleContext = createContext(1);
+const ServiceLanguageContext = createContext<LanguageCode>('SK');
+
+function cycleValue<T extends readonly string[]>(options: T, current: T[number]): T[number] {
+  const idx = options.indexOf(current);
+  return options[(idx + 1 + options.length) % options.length];
+}
+
+function maskServiceSecret(raw: string | null | undefined): string {
+  return (raw ?? '').trim() || '—';
+}
+
+function serviceLocale(lang: LanguageCode): string {
+  return lang === 'DE' ? 'de-DE' : lang === 'EN' ? 'en-GB' : 'sk-SK';
+}
+
+function formatServiceNumber(lang: LanguageCode, value: number, digits = 0): string {
+  return value.toLocaleString(serviceLocale(lang), {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
+function formatServiceDateTime(lang: LanguageCode, raw: string | null | undefined): string {
+  if (!raw) return '—';
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) return raw;
+  return new Intl.DateTimeFormat(serviceLocale(lang), {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(dt);
+}
+
+function serviceFieldLabelText(lang: LanguageCode, key: string): string {
+  if (lang === 'DEV') return key;
+  if (key.startsWith('connectivity.ocpp.key.ConnectorPhaseRotation.')) {
+    const suffix = key.split('.').slice(-1)[0];
+    return `Fázy ${suffix}`;
+  }
+  return SERVICE_SK_FIELD_LABELS[key] ?? key;
+}
+
+function serviceHumanValue(lang: LanguageCode, key: string, value: string): string {
+  if (lang === 'DEV') return value;
+  const map: Record<string, string> = {
+    READY: 'Pripravený',
+    WAIT_INTERNET: 'Čaká na internet',
+    AVAILABLE: 'Dostupný',
+    UNAVAILABLE: 'Nedostupný',
+    COM_ERR: 'Chyba komunikácie',
+    MANUAL: 'Manual',
+    INIT: 'Init',
+    FW_UPDATE: 'FW update',
+    charging: 'Nabíjanie',
+    available: 'Voľný',
+    preparing: 'Príprava',
+    suspendedEV: 'Pozastavené EV',
+    suspendedEVSE: 'Pozastavené EVSE',
+    faultedWithTransa: 'Chyba s TX',
+    faultedWithoutTransa: 'Chyba bez TX',
+    wifi: 'Wi-Fi',
+    WIFI: 'Wi-Fi',
+    eth: 'ETH',
+    ETH: 'ETH',
+    '4g': 'Dáta',
+    shared: 'Zdieľaný',
+    public: 'Verejný',
+    private: 'Súkromný',
+    RUNNING: 'Beží',
+  };
+  if (key === 'connectivity.ocpp.version' && value === '1.6J') return 'OCPP 1.6J';
+  return map[value] ?? value;
+}
+
+function buildServiceConnectorState(connector: TpConnector, index: number): ServiceConnectorState {
+  const activeTx = connector.activeTx;
+  const now = new Date();
+  const lastResponse = new Date(now.getTime() - (index + 1) * 17_000).toISOString();
+  const meterResponse = new Date(now.getTime() - (index + 1) * 9_000).toISOString();
+  const defaultSchedule =
+    index % 2 === 0
+      ? ['Mon-Fri 07:00-19:00', 'Sat 09:00-12:00']
+      : ['Daily 00:00-23:59'];
+  return {
+    evmLastResponse: lastResponse,
+    evmBudget: connector.budgetAmps ?? connector.maxAmps,
+    evmRcdEnabled: true,
+    evmPermanentLock: index === 1,
+    evmManualEnabled: index === 1,
+    evmManualBudget: index === 1 ? 10 : 0,
+    evmManualDo1: false,
+    evmManualDo2: index === 1,
+    evmManualLock: index === 1,
+    evmManualIgnoreRcd: false,
+    evmFwVersion: 53 + index,
+    evmHwAddress: index === 0 ? '00A1' : '00B2',
+    evmCibEnabled: index === 0,
+    evmCpV: connector.vehicleSignalV ?? 12,
+    evmRcdErr: false,
+    evmDo1: index === 1,
+    evmDo2: false,
+    evmLock: index === 1,
+    evmState: index === 1 ? 'MANUAL' : 'AVAILABLE',
+    publicPolicyValidNow: connector.hasPublicPolicy,
+    publicPolicyValidTo: new Date(now.getTime() + (index + 2) * 86_400_000).toISOString(),
+    publicPolicyPolicyEndUtc: new Date(now.getTime() + (index + 10) * 86_400_000).toISOString(),
+    publicPolicyWithoutTimeSchedule: index === 1,
+    publicPolicyScheduleActiveNow: connector.hasPublicPolicy,
+    publicPolicySchedule: defaultSchedule,
+    meterLastResponse: meterResponse,
+    meterEnergy: Math.round((connector.meter.energy * 1000 + index * 1420) * 10) / 10,
+    meterEnergyPhase: [4520 + index * 140, 4475 + index * 125, 4498 + index * 110],
+    meterVoltagePhase: [230.5, 229.8, 231.2],
+    meterPower: connector.meter.power,
+    meterPowerPhase: [2.7, 2.8, 2.7],
+    meterCurrentPhase: [11.4, 11.2, 11.3],
+    meterCountImp: 15400 + index * 730,
+    meterCountImpLast: 15344 + index * 730,
+    meterState: connector.hasPublicPolicy ? 'AVAILABLE' : 'UNAVAILABLE',
+    ocppStatusLastSent: connector.ocpp.status,
+    ocppStatusChangedAt: new Date(now.getTime() - (index + 1) * 305_000).toISOString(),
+    activeTxHasReachedCharging: activeTx != null,
+    activeTxMeterValueStartWh: activeTx ? 15220 : 0,
+    activeTxMeterValueEndWh: activeTx ? 18435 : 0,
+    activeTxTagId: activeTx?.rfidTag ?? '—',
+    activeTxUserId: activeTx?.accountId ?? '—',
+    activeTxAvPolicyType: activeTx?.accessMode ?? (connector.hasPublicPolicy ? 'public' : 'private'),
+    activeTxPriceMeta: activeTx
+      ? {
+          pricePerKwh: activeTx.pricePerKwh ?? connector.publicPolicy.price,
+          hasAdditionalFees: activeTx.hasAdditionalFees ?? false,
+        }
+      : {},
+    activeTxChargingTime: activeTx?.chargingTime ?? '00:00:00',
+    activeTxSuspendedByUserTime: activeTx ? '00:03:10' : '00:00:00',
+    activeTxVatRate: 0.23,
+    activeTxCostWithVat: activeTx?.costWithVat ?? 0,
+    activeTxChargingStartTs: activeTx
+      ? new Date(now.getTime() - 3_900_000).toISOString()
+      : new Date(now.getTime() - 900_000).toISOString(),
+    activeTxChargingEndTs: activeTx ? null : new Date(now.getTime() - 240_000).toISOString(),
+    connectorPhaseRotation: index === 0 ? 'RST' : 'RTS',
+  };
+}
+
+function buildInitialServiceConnectorState(connectors: TpConnector[]): Record<string, ServiceConnectorState> {
+  return Object.fromEntries(connectors.map((connector, index) => [connector.id, buildServiceConnectorState(connector, index)]));
+}
 
 function scaleTextStyle(style: StyleProp<TextStyle>, scale: number): StyleProp<TextStyle> {
   if (scale === 1) return style;
@@ -443,7 +946,8 @@ function ZoomAdaptiveText({
         style={[
           style,
           { fontSize, lineHeight },
-          !measured ? { opacity: 0 } : null,
+          /* Web: bez pred-meraním skrytia — inak môže zostať measured=false a len ikony sú viditeľné. */
+          !measured && Platform.OS !== 'web' ? { opacity: 0 } : null,
           Platform.OS === 'web'
             ? ({
                 textOverflow: 'clip',
@@ -513,9 +1017,8 @@ function resolveHelpIdFromContext(selectedConnectorId: string | null, connectors
   if (st === 'connectEV' || st === 'preparing') return 'info-3';
   if (st === 'suspendedEV') return 'info-6';
   if (st === 'disconnectEV') return 'info-6';
-  if (st === 'suspendedEVSE' || st === 'suspended') return 'info-7';
-  if (st === 'faulted' || st === 'faultedWithTransa' || st === 'faultedWithoutTransa') return 'info-8';
-  if (st === 'finishing') return 'info-3';
+  if (st === 'suspendedEVSE') return 'info-7';
+  if (st === 'faultedWithTransa' || st === 'faultedWithoutTransa') return 'info-8';
   return 'info-1';
 }
 
@@ -545,6 +1048,37 @@ function buildHelpPage(lang: LanguageCode, id: HelpId): HelpPage {
   };
 }
 
+const SERVICE_FIRMWARE_GLOBAL_FILE = 'C-EV-2505M-TP-115200+7.tfw';
+const SERVICE_FIRMWARE_GLOBAL_VERSION = '5.4.0';
+
+type ServiceFirmwareConnectorMock =
+  | { inSync: true }
+  | { inSync: false; phase: 'uploading' | 'waiting'; percent: number };
+
+/** Mock: zhoda s globálnym súborom / fáza odosielania do EV modulu konektora. */
+const SERVICE_FIRMWARE_CONNECTOR_MOCK: Record<string, ServiceFirmwareConnectorMock> = {
+  c1: { inSync: true },
+  c2: { inSync: false, phase: 'uploading', percent: 57.3 },
+};
+
+function formatServiceFirmwarePercent(lang: LanguageCode, value: number): string {
+  const locale = lang === 'DE' ? 'de-DE' : lang === 'EN' ? 'en-GB' : 'sk-SK';
+  const s = value.toLocaleString(locale, { maximumFractionDigits: 1, minimumFractionDigits: 0 });
+  return `${s} %`;
+}
+
+function serviceFirmwareConnectorStatusText(lang: LanguageCode, connectorId: string): string {
+  const mock = SERVICE_FIRMWARE_CONNECTOR_MOCK[connectorId] ?? { inSync: true };
+  if (mock.inSync) {
+    return t(lang, 'service.firmware.sameAsStation');
+  }
+  const phaseLabel =
+    mock.phase === 'uploading'
+      ? t(lang, 'service.firmware.phaseUploading')
+      : t(lang, 'service.firmware.phaseWaiting');
+  return `${phaseLabel} · ${formatServiceFirmwarePercent(lang, mock.percent)}`;
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home');
   const [language, setLanguage] = useState<LanguageCode>(mockConfig.station.defaultLanguage);
@@ -556,20 +1090,55 @@ export default function App() {
   const [magnifierOn, setMagnifierOn] = useState(false);
   const [servicePinInput, setServicePinInput] = useState('');
   const [servicePinError, setServicePinError] = useState('');
+  const [serviceBrowserUrl, setServiceBrowserUrl] = useState('https://agevolt.sk');
+  const [mockServiceContrast, setMockServiceContrast] = useState(true);
+  const [mockServiceInverseContrast, setMockServiceInverseContrast] = useState(false);
+  const [connectorsConfigTick, setConnectorsConfigTick] = useState(0);
   const logoTapCountRef = useRef(0);
   const logoTapResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [now, setNow] = useState(() => new Date());
   const [rfidTapFeedback, setRfidTapFeedback] = useState<'ok' | 'reject' | null>(null);
+  /** Oddelené od `rfidTapFeedback`, aby sa pri `visible={false}` ešte renderovala ikona počas fade-outu. */
+  const [rfidTapModalVisible, setRfidTapModalVisible] = useState(false);
   const rfidTapTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  /** Kým `Date.now() <` hodnoty, ignorujeme ďalšie simulované priloženie (modal + fade + cooldown). */
+  const rfidDevTapBlockedUntilRef = useRef(0);
+  const [accountsRuntime, setAccountsRuntime] = useState<MockAccount[]>(() => mockConfig.accounts ?? []);
+  const [rfidCardsRuntime, setRfidCardsRuntime] = useState<MockRfidCard[]>(() => mockConfig.rfidCards ?? []);
+  const [stationRfidUid, setStationRfidUid] = useState<string | null>(null);
+  const [stationRfidStep, setStationRfidStep] = useState<StationRfidStep>('summary');
+  const [stationLoginInput, setStationLoginInput] = useState('');
+  const [stationPasswordInput, setStationPasswordInput] = useState('');
+  const [stationLoginError, setStationLoginError] = useState('');
+  const [stationLinkedAccountId, setStationLinkedAccountId] = useState<string | null>(null);
+  const [stationSelectedSpaceId, setStationSelectedSpaceId] = useState<string | null>(null);
+  const [stationSpaceSearch, setStationSpaceSearch] = useState('');
+  const [stationVehicleSearch, setStationVehicleSearch] = useState('');
+  const [stationPendingLink, setStationPendingLink] = useState<{
+    vehicleId: string | null;
+    blocked: boolean;
+  } | null>(null);
+  /** Predvolený výber v kroku Vozidlo (prvé vozidlo alebo Bez vozidla). */
+  const [stationVehicleUi, setStationVehicleUi] = useState<StationVehicleUi | null>(null);
+  /** Full-screen výber priestoru / vozidla (namiesto dlhého zoznamu v kroku). */
+  const [stationRfidPicker, setStationRfidPicker] = useState<null | 'space' | 'vehicle'>(null);
+  const [stationCreatePlate, setStationCreatePlate] = useState('');
+  const [stationCreateVehicleName, setStationCreateVehicleName] = useState('');
+  const [stationCreateError, setStationCreateError] = useState('');
   const connectorIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenRef = useRef<Screen>(screen);
   const effectiveConnectorIdRef = useRef<string | null>(null);
   const connectorIdleMoveBumpAtRef = useRef(0);
+  /** Mock: prepínač dvojkonektor / jedenkonektor v UI (klik na Device ID v hlavičke stanice). */
+  const [mockDevDualConnectorLayout, setMockDevDualConnectorLayout] = useState(true);
   const [connectorRuntime, setConnectorRuntime] = useState(() =>
     Object.fromEntries(
       mockConfig.connectors.map((connector) => [
         connector.id,
-        { status: connector.ocpp.status, activeTx: connector.activeTx as ActiveTx | null },
+        {
+          status: normalizeConnectorStatus(connector.ocpp.status),
+          activeTx: connector.activeTx as ActiveTx | null,
+        },
       ])
     ) as Record<string, { status: ConnectorStatus; activeTx: ActiveTx | null }>
   );
@@ -579,20 +1148,101 @@ export default function App() {
         const runtime = connectorRuntime[connector.id];
         return {
           ...connector,
-          ocpp: { status: runtime?.status ?? connector.ocpp.status },
+          ocpp: { status: normalizeConnectorStatus(runtime?.status ?? connector.ocpp.status) },
           activeTx: runtime?.activeTx ?? connector.activeTx,
         };
       }),
     [connectorRuntime]
   );
+  /** Konektory zobrazené na domovskej obrazovke (pri „jednonabíjačke“ len prvý). */
+  const homeUiConnectors = useMemo(
+    () =>
+      mockDevDualConnectorLayout || runtimeConnectors.length <= 1
+        ? runtimeConnectors
+        : runtimeConnectors.slice(0, 1),
+    [mockDevDualConnectorLayout, runtimeConnectors]
+  );
+  const stationRfidCard = useMemo<StationCardSnapshot | null>(
+    () =>
+      stationRfidUid
+        ? getStationCardSnapshot(stationRfidUid, rfidCardsRuntime, accountsRuntime, mockConfig.rfidCards)
+        : null,
+    [stationRfidUid, rfidCardsRuntime, accountsRuntime]
+  );
+  /** Horná bublina modálu: ŠPZ/názov/e-mail z účtu; ak chýba, z autorizovanej TX (dev Ctrl+A). */
+  const stationRfidSummaryVehicleDriver = useMemo(() => {
+    if (!stationRfidCard?.known) {
+      return { plate: '', vehicleName: '', driverEmail: '' };
+    }
+    const uid = stationRfidCard.uid;
+    const parent = stationRfidCard.cardParentTag ?? null;
+    let plate = (stationRfidCard.vehicle?.plate ?? '').trim();
+    let vname = (stationRfidCard.vehicle?.name ?? '').trim();
+    let email = (stationRfidCard.driverEmail ?? '').trim();
+    if (!plate && !vname) {
+      for (const c of homeUiConnectors) {
+        const tx = c.activeTx;
+        if (!tx || !isTxAuthorizedForRfidUid(tx, uid, parent)) continue;
+        const tp = (tx.vehiclePlate ?? '').trim();
+        const tn = (tx.vehicleName ?? '').trim();
+        if (tp || tn) {
+          plate = tp || plate;
+          vname = tn || vname;
+          break;
+        }
+      }
+    }
+    if (!email) {
+      for (const c of homeUiConnectors) {
+        const tx = c.activeTx;
+        if (!tx || !isTxAuthorizedForRfidUid(tx, uid, parent)) continue;
+        const em = (tx.driverEmail ?? '').trim();
+        if (em) {
+          email = em;
+          break;
+        }
+      }
+    }
+    return { plate, vehicleName: vname, driverEmail: email };
+  }, [stationRfidCard, homeUiConnectors]);
+  const stationLinkedAccount = useMemo(
+    () => accountsRuntime.find((item) => item.id === stationLinkedAccountId) ?? null,
+    [accountsRuntime, stationLinkedAccountId]
+  );
+  /** Kompaktný výber vozidla: ŠPZ + názov — vyššia bublina a dva riadky textu. */
+  const stationRfidPickVehicleCompactTwoLines = useMemo(() => {
+    if (stationRfidStep !== 'pickVehicle' || !stationLinkedAccount || stationVehicleUi?.kind !== 'vehicle') {
+      return false;
+    }
+    const v = stationLinkedAccount.vehicles.find((x) => x.id === stationVehicleUi.vehicleId);
+    const p = (v?.plate ?? '').trim();
+    const n = (v?.name ?? '').trim();
+    return p.length > 0 && n.length > 0;
+  }, [stationRfidStep, stationLinkedAccount, stationVehicleUi]);
+  const stationConnectorDecisions = useMemo<StationConnectorDecision[]>(
+    () =>
+      stationRfidCard
+        ? homeUiConnectors.map((connector) =>
+            buildStationConnectorDecision(connector, stationRfidCard, mockConfig.station.currency)
+          )
+        : [],
+    [homeUiConnectors, stationRfidCard]
+  );
+  /** Ak aspoň jeden konektor v modáli ukazuje sumu, ostatné dostanú prázdny slot rovnakej výšky (zarovnanie Detail). */
+  const stationRfidAnyConnectorCostRow = useMemo(
+    () => stationConnectorDecisions.some((d) => Boolean(d.txTotalCostLabel)),
+    [stationConnectorDecisions]
+  );
+  const stationRfidModalOpen = stationRfidUid !== null;
+  /** RFID „stanica“ aj pri jednom konektore — rovnaký flow ako dvojkonektor (prehľad → detail). */
+  const isStationOverviewRfidContext =
+    screen === 'home' && selectedConnectorId === null && homeUiConnectors.length >= 1;
 
   const cycleMockConnectorStatus = useCallback((connectorId: string) => {
     setConnectorRuntime((prev) => {
       const cur = prev[connectorId];
-      const curStatus = cur?.status ?? 'available';
-      const idx = MOCK_CONNECTOR_STATUS_CYCLE.indexOf(curStatus);
-      const nextIdx = (idx < 0 ? 0 : idx + 1) % MOCK_CONNECTOR_STATUS_CYCLE.length;
-      const nextStatus = MOCK_CONNECTOR_STATUS_CYCLE[nextIdx];
+      const curStatus = normalizeConnectorStatus(cur?.status);
+      const nextStatus = nextMockConnectorStatus(curStatus);
       const needsTx = isTxActiveStatus(nextStatus);
       const cfg = mockConfig.connectors.find((c) => c.id === connectorId);
       const pp = cfg?.publicPolicy;
@@ -603,6 +1253,9 @@ export default function App() {
         pricePerKwh: pp?.price ?? null,
         hasAdditionalFees:
           (pp?.sessionFee ?? 0) > 0 || (pp?.parkingPerHour ?? 0) > 0 || (pp?.occupyPerHour ?? 0) > 0,
+        rfidTag: cur?.activeTx?.rfidTag ?? cur?.activeTx?.linkedCardUid ?? 'mock-rfid',
+        parentTag: cur?.activeTx?.parentTag ?? null,
+        linkedCardUid: cur?.activeTx?.linkedCardUid ?? 'mock-rfid',
       };
       return {
         ...prev,
@@ -613,12 +1266,242 @@ export default function App() {
       };
     });
   }, []);
-  const effectiveConnectorIdForContext = useMemo(
-    () =>
-      selectedConnectorId ??
-      (runtimeConnectors.length === 1 ? runtimeConnectors[0]?.id ?? null : null),
-    [selectedConnectorId, runtimeConnectors]
+  const resetStationRfidStepState = useCallback(() => {
+    setStationRfidStep('summary');
+    setStationLoginInput('');
+    setStationPasswordInput('');
+    setStationLoginError('');
+    setStationLinkedAccountId(null);
+    setStationSelectedSpaceId(null);
+    setStationSpaceSearch('');
+    setStationVehicleSearch('');
+    setStationPendingLink(null);
+    setStationVehicleUi(null);
+    setStationRfidPicker(null);
+    setStationCreatePlate('');
+    setStationCreateVehicleName('');
+    setStationCreateError('');
+  }, []);
+  const closeStationRfidFlow = useCallback(() => {
+    resetStationRfidStepState();
+    setStationRfidUid(null);
+  }, [resetStationRfidStepState]);
+
+  const openStationRfidLoginStep = useCallback(() => {
+    setStationLoginInput(STATION_RFID_PREFILL_LOGIN);
+    setStationPasswordInput(STATION_RFID_PREFILL_PASSWORD);
+    setStationLoginError('');
+    setStationRfidStep('login');
+  }, []);
+
+  /** Dev (Ctrl+A–D): nastaví stav konektorov podľa testovacej karty pred otvorením RFID modálu. */
+  const applyDevRfidConnectorPresetForTag = useCallback((tag: string) => {
+    if (Platform.OS !== 'web' || !DEV_RFID_TEST_TAGS.has(tag)) return;
+    const txForScannedCard = (uid: string): ActiveTx => ({
+      id: `tx-preset-${uid}`,
+      chargingTime: '01:02:03',
+      costWithVat: 6.84,
+      pricePerKwh: 0.18,
+      hasAdditionalFees: true,
+      rfidTag: uid,
+      parentTag: null,
+      linkedCardUid: uid,
+      accountId: 'acc-jozef',
+      vehicleId: 'veh-enyaq',
+      vehiclePlate: 'BA 123XY',
+      vehicleName: 'Skoda Enyaq 80 Max',
+      driverEmail: 'jozef.novak.skoda@example.com',
+      accessMode: 'shared',
+    });
+    const txOtherCard: ActiveTx = {
+      id: 'tx-preset-remote-other',
+      chargingTime: '00:45:11',
+      costWithVat: 3.2,
+      pricePerKwh: 0.39,
+      hasAdditionalFees: false,
+      rfidTag: 'REMOTE_OTHER_CARD',
+      parentTag: null,
+      linkedCardUid: 'REMOTE_OTHER_CARD',
+      accountId: 'acc-anna',
+      vehicleId: 'veh-tesla',
+      vehiclePlate: 'BL 777EL',
+      vehicleName: 'Tesla Model 3',
+      driverEmail: 'anna.fischer.ev@example.com',
+      accessMode: 'private',
+    };
+    const idle = { status: 'available' as const, activeTx: null };
+    setConnectorRuntime((prev) => {
+      if (tag === DEV_RFID_TAG_CTRL_A) {
+        return {
+          ...prev,
+          c1: { status: 'charging', activeTx: txForScannedCard(tag) },
+          c2: idle,
+        };
+      }
+      if (tag === DEV_RFID_TAG_CTRL_B) {
+        return {
+          ...prev,
+          c1: idle,
+          c2: { status: 'charging', activeTx: txOtherCard },
+        };
+      }
+      if (tag === DEV_RFID_TAG_CTRL_C || tag === DEV_RFID_TAG_CTRL_D) {
+        return { ...prev, c1: idle, c2: idle };
+      }
+      return prev;
+    });
+  }, []);
+
+  const openStationRfidFlow = useCallback(
+    (uid: string) => {
+      resetStationRfidStepState();
+      setStationRfidUid(uid);
+    },
+    [resetStationRfidStepState]
   );
+  const applyStationCardLink = useCallback(
+    (
+      accountId: string,
+      vehicleId: string | null,
+      opts?: { blocked?: boolean; spaceId?: string | null }
+    ) => {
+      if (!stationRfidUid) return;
+      const blocked = opts?.blocked ?? false;
+      const spaceId = opts?.spaceId ?? null;
+      setRfidCardsRuntime((prev) => {
+        const nextCard: MockRfidCard = {
+          uid: stationRfidUid,
+          known: true,
+          blocked,
+          accountId,
+          spaceId,
+          vehicleId,
+        };
+        const idx = prev.findIndex((item) => item.uid === stationRfidUid);
+        if (idx < 0) return [...prev, nextCard];
+        return prev.map((item, index) => (index === idx ? { ...item, ...nextCard } : item));
+      });
+      setStationLinkedAccountId(accountId);
+      setStationRfidStep('summary');
+      setStationLoginInput('');
+      setStationPasswordInput('');
+      setStationLoginError('');
+      setStationCreatePlate('');
+      setStationCreateVehicleName('');
+      setStationCreateError('');
+      setStationPendingLink(null);
+    },
+    [stationRfidUid]
+  );
+  const openStationConnectorDetail = useCallback(
+    (connectorId: string) => {
+      closeStationRfidFlow();
+      setSelectedConnectorId(connectorId);
+    },
+    [closeStationRfidFlow]
+  );
+  const handleStationConnectorStop = useCallback(
+    (connectorId: string) => {
+      setConnectorRuntime((prev) => ({
+        ...prev,
+        [connectorId]: {
+          status: 'available',
+          activeTx: null,
+        },
+      }));
+      closeStationRfidFlow();
+    },
+    [closeStationRfidFlow]
+  );
+  const handleStationConnectorStart = useCallback(
+    (connectorId: string, decision: StationConnectorDecision) => {
+      if (!stationRfidUid || !stationRfidCard) return;
+      setConnectorRuntime((prev) => {
+        const current = runtimeConnectors.find((item) => item.id === connectorId);
+        if (!current) return prev;
+        const policy =
+          stationRfidCard.account?.id != null
+            ? current.rfidAccountPolicies?.find((item) => item.accountId === stationRfidCard.account?.id) ?? null
+            : null;
+        const nextTx: ActiveTx = {
+          id: `tx-${connectorId}-${Date.now()}`,
+          chargingTime: '00:00:00',
+          costWithVat: 0,
+          pricePerKwh:
+            decision.pricePerKwh ??
+            policy?.pricePerKwh ??
+            (current.hasPublicPolicy ? current.publicPolicy.price : null),
+          hasAdditionalFees: policy?.hasAdditionalFees ?? false,
+          rfidTag: stationRfidUid,
+          parentTag: null,
+          linkedCardUid: stationRfidUid,
+          accountId: stationRfidCard.account?.id ?? null,
+          vehicleId: stationRfidCard.vehicle?.id ?? null,
+          vehiclePlate: stationRfidCard.vehicle?.plate ?? null,
+          vehicleName: stationRfidCard.vehicle?.name ?? null,
+          driverEmail: stationRfidCard.driverEmail ?? null,
+          accessMode: decision.accessMode,
+        };
+        return {
+          ...prev,
+          [connectorId]: {
+            status: 'preparing',
+            activeTx: nextTx,
+          },
+        };
+      });
+      closeStationRfidFlow();
+      setSelectedConnectorId(connectorId);
+    },
+    [closeStationRfidFlow, runtimeConnectors, stationRfidCard, stationRfidUid]
+  );
+  const handleStationLoginSubmit = useCallback(() => {
+    const account = findRfidAccountByCredentials(
+      accountsRuntime,
+      stationLoginInput,
+      stationPasswordInput
+    );
+    if (!account) {
+      setStationLoginError(t(language, 'rfid.station.loginInvalid'));
+      return;
+    }
+    setStationLinkedAccountId(account.id);
+    setStationLoginError('');
+    const fallbackSpace =
+      mockConfig.station.location?.name ?? mockConfig.operator.owner.name ?? 'Priestor';
+    const spaces = getSpacesForStationAccount(account, fallbackSpace);
+    setStationSelectedSpaceId(spaces.length > 0 ? spaces[0].id : null);
+    setStationSpaceSearch('');
+    setStationVehicleSearch('');
+    setStationRfidStep('pickSpace');
+  }, [accountsRuntime, language, stationLoginInput, stationPasswordInput]);
+  const handleStationCreateVehicle = useCallback(() => {
+    if (!stationLinkedAccountId) return;
+    const plate = stationCreatePlate.trim().toUpperCase();
+    const name = stationCreateVehicleName.trim();
+    if (!plate && !name) {
+      setStationCreateError(t(language, 'rfid.station.createVehiclePlateOrNameRequired'));
+      return;
+    }
+    const nextVehicle: MockVehicle = {
+      id: `veh-${Date.now()}`,
+      plate,
+      name: name || undefined,
+    };
+    setAccountsRuntime((prev) =>
+      prev.map((account) =>
+        account.id === stationLinkedAccountId
+          ? { ...account, vehicles: [...account.vehicles, nextVehicle] }
+          : account
+      )
+    );
+    setStationPendingLink({ vehicleId: nextVehicle.id, blocked: false });
+    setStationCreatePlate('');
+    setStationCreateVehicleName('');
+    setStationCreateError('');
+    setStationRfidStep('confirmLink');
+  }, [language, stationCreatePlate, stationCreateVehicleName, stationLinkedAccountId]);
+  const effectiveConnectorIdForContext = useMemo(() => selectedConnectorId, [selectedConnectorId]);
   screenRef.current = screen;
   effectiveConnectorIdRef.current = effectiveConnectorIdForContext;
   const [isNetworkOnline, setIsNetworkOnline] = useState(
@@ -630,7 +1513,153 @@ export default function App() {
   const [ocppConnectionState, setOcppConnectionState] = useState<OcppConnectionState>(
     mockConfig.system?.ocppConnectionState ?? 'ok'
   );
+  const integrationsOcppWsUrlLine = useMemo(() => {
+    const host = 'ocpp.my.agevolt.com';
+    const port = 443;
+    const pathSeg = 'ocpp';
+    const scheme = port === 443 ? 'wss' : 'ws';
+    return `${scheme}://${host}:${port}/${pathSeg.replace(/^\/+/, '')}`;
+  }, []);
+  const integrationsOcppClientVersion = '2.0.1';
+  const integrationsMqttClientVersion = '1.4.0';
+  const integrationsOcppStatusText = useMemo(() => {
+    if (ocppConnectionState === 'ok') return t(language, 'service.integrations.ocppStateOk');
+    if (ocppConnectionState === 'connecting') return t(language, 'service.integrations.ocppStateConnecting');
+    return t(language, 'service.integrations.ocppStateOffline');
+  }, [language, ocppConnectionState]);
+  const integrationsStatusRows = useMemo(() => {
+    const online = t(language, 'service.integrations.online');
+    const offline = t(language, 'service.integrations.offline');
+    const wifiUp = networkType === 'wifi' && isNetworkOnline;
+    const dataUp = networkType === '4g' && isNetworkOnline;
+    const ethUp = networkType === 'eth' && isNetworkOnline;
+    const wifiVal = wifiUp ? `${online} · Hotel-Lesná · -62 dBm` : offline;
+    const dataVal = dataUp ? `${online} · 4/5` : offline;
+    const ethVal = ethUp ? `${online} · 192.168.88.1` : offline;
+    const internetVal = !isNetworkOnline
+      ? offline
+      : networkType === 'wifi'
+        ? t(language, 'service.integrations.internetRouteWifi')
+        : networkType === '4g'
+          ? t(language, 'service.integrations.internetRouteData')
+          : t(language, 'service.integrations.internetRouteEth');
+    const hotspotActive = true;
+    const hotspotClients = 2;
+    const hotspotVal = hotspotActive
+      ? `${online} · ${hotspotClients} ${t(language, 'service.integrations.devices')}`
+      : offline;
+    const ethShareActive = false;
+    const ethShareClients = 0;
+    const ethShareVal = ethShareActive
+      ? `${online} · ${ethShareClients} ${t(language, 'service.integrations.devices')}`
+      : offline;
+    return [
+      { key: 'wifi', label: t(language, 'service.integrations.labelWifi'), value: wifiVal },
+      { key: 'data', label: t(language, 'service.integrations.labelData'), value: dataVal },
+      { key: 'eth', label: t(language, 'service.integrations.labelEth'), value: ethVal },
+      { key: 'internet', label: t(language, 'service.integrations.labelInternet'), value: internetVal },
+      { key: 'hotspot', label: t(language, 'service.integrations.labelHotspot'), value: hotspotVal },
+      { key: 'ethShare', label: t(language, 'service.integrations.labelEthShare'), value: ethShareVal },
+    ] as const;
+  }, [language, networkType, isNetworkOnline]);
+  const [serviceStationDefaultLanguage, setServiceStationDefaultLanguage] = useState<Exclude<LanguageCode, 'DEV'>>(
+    mockConfig.station.defaultLanguage
+  );
+  const [serviceStationModbusMeter, setServiceStationModbusMeter] = useState(true);
+  const [serviceStationMeterS0count, setServiceStationMeterS0count] = useState(1000);
+  const [serviceOperatorPaymentAllowed, setServiceOperatorPaymentAllowed] = useState(false);
+  const [serviceOperatorOwnerName, setServiceOperatorOwnerName] = useState(mockConfig.operator.owner.name ?? '');
+  const [serviceOperatorHelpdeskNumber, setServiceOperatorHelpdeskNumber] = useState(
+    mockConfig.operator.helpdeskNumber ?? ''
+  );
+  const [serviceOperatorAppleStoreLink, setServiceOperatorAppleStoreLink] = useState(
+    mockConfig.operator.appleStoreLink ?? ''
+  );
+  const [serviceOperatorAndroidStoreLink, setServiceOperatorAndroidStoreLink] = useState(
+    mockConfig.operator.androidStoreLink ?? ''
+  );
+  const [serviceOperatorChargingLink, setServiceOperatorChargingLink] = useState(
+    mockConfig.operator.chargingLink ?? ''
+  );
+  const [serviceSelectedConnectorId, setServiceSelectedConnectorId] = useState<string | null>(
+    mockConfig.connectors[0]?.id ?? null
+  );
+  const [serviceConnectorState, setServiceConnectorState] = useState<Record<string, ServiceConnectorState>>(
+    () => buildInitialServiceConnectorState(mockConfig.connectors)
+  );
+  const [serviceOcppConfig, setServiceOcppConfig] = useState(() => ({
+    AllowOfflineTxForUnknownId: false,
+    AuthorizationCacheEnabled: false,
+    AuthorizeRemoteTxRequests: true,
+    LocalAuthorizeOffline: false,
+    LocalPreAuthorize: false,
+    LocalAuthListEnabled: false,
+    LocalAuthListMaxLength: 0,
+    SendLocalListMaxLength: 0,
+    MaxEnergyOnInvalidId: 0,
+    StopTransactionOnInvalidId: true,
+    BlinkRepeat: 0,
+    ClockAlignedDataInterval: 0,
+    ConnectionTimeOut: 60,
+    GetConfigurationMaxKeys: 50,
+    HeartbeatInterval: 3600,
+    LightIntensity: 100,
+    MeterValueSampleInterval: 60,
+    MinimumStatusDuration: 0,
+    ResetRetries: 0,
+    TransactionMessageAttempts: 3,
+    TransactionMessageRetryInterval: 60,
+    WebSocketPingInterval: 50,
+    MeterValuesAlignedData: [] as string[],
+    MeterValuesAlignedDataMaxLength: 0,
+    MeterValuesSampledData: [
+      'Energy.Active.Import.Register',
+      'Current.Import',
+      'Current.Offered',
+      'Power.Active.Import',
+      'Voltage',
+    ] as string[],
+    MeterValuesSampledDataMaxLength: 6,
+    StopTxnAlignedData: [] as string[],
+    StopTxnAlignedDataMaxLength: 0,
+    StopTxnSampledData: ['Energy.Active.Import.Register', 'Power.Active.Import'] as string[],
+    StopTxnSampledDataMaxLength: 0,
+    NumberOfConnectors: mockConfig.connectors.length,
+    ConnectorPhaseRotationMaxLength: mockConfig.connectors.length,
+    SupportedFeatureProfiles: ['Core'] as string[],
+    SupportedFeatureProfilesMaxLength: 1,
+    ReserveConnectorZeroSupported: false,
+    ChargeProfileMaxStackLevel: 0,
+    ChargingScheduleAllowedChargingRateUnit: ['Current'] as string[],
+    ChargingScheduleMaxPeriods: 0,
+    ConnectorSwitch3to1PhaseSupported: false,
+    MaxChargingProfilesInstalled: 0,
+    StopTransactionOnEVSideDisconnect: true,
+    UnlockConnectorOnEVSideDisconnect: true,
+  }));
+  const serviceSelectedConnector = useMemo(
+    () => runtimeConnectors.find((connector) => connector.id === serviceSelectedConnectorId) ?? runtimeConnectors[0] ?? null,
+    [runtimeConnectors, serviceSelectedConnectorId]
+  );
+  const serviceSelectedConnectorData = serviceSelectedConnector
+    ? serviceConnectorState[serviceSelectedConnector.id]
+    : null;
   const stationLocationName = mockConfig.station.location?.name ?? 'Location';
+  /** Workspace / vlastník karty – rovnaký údaj ako v hornom riadku hlavičky (`user-tie` + meno). */
+  const operatorOwnerName = mockConfig.operator.owner.name ?? '';
+  const stationSpacesForRfid = useMemo((): MockSpace[] => {
+    if (!stationLinkedAccount) return [];
+    const fb =
+      mockConfig.station.location?.name ?? (operatorOwnerName.length > 0 ? operatorOwnerName : stationLocationName);
+    return getSpacesForStationAccount(stationLinkedAccount, fb);
+  }, [stationLinkedAccount, operatorOwnerName, stationLocationName]);
+
+  useEffect(() => {
+    if (stationRfidStep !== 'pickVehicle' || !stationLinkedAccount) return;
+    if (stationVehicleUi != null) return;
+    const v = stationLinkedAccount.vehicles ?? [];
+    setStationVehicleUi(v.length > 0 ? { kind: 'vehicle', vehicleId: v[0].id } : { kind: 'without' });
+  }, [stationRfidStep, stationLinkedAccount, stationVehicleUi]);
   const stationName = mockConfig.station.name ?? 'Station 01';
   const stationDeviceId = mockConfig.station.ocppDeviceId ?? 'TP-DEVICE-001';
   const androidStoreLink = mockConfig.operator.androidStoreLink ?? 'https://play.google.com/store';
@@ -654,16 +1683,32 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!e.ctrlKey) return;
       const key = e.key.toLowerCase();
-      if (key !== 'a' && key !== 'b') return;
+      if (key !== 'a' && key !== 'b' && key !== 'c' && key !== 'd') return;
       const el = e.target as HTMLElement | null;
       if (el?.closest?.('input, textarea, [contenteditable="true"]')) return;
+      if (stationRfidModalOpen) {
+        e.preventDefault();
+        return;
+      }
+      if (Date.now() < rfidDevTapBlockedUntilRef.current) {
+        e.preventDefault();
+        return;
+      }
       e.preventDefault();
-      const tag = key === 'a' ? DEV_RFID_TAG_CTRL_A : DEV_RFID_TAG_CTRL_B;
+      const tagMap: Record<string, string> = {
+        a: DEV_RFID_TAG_CTRL_A,
+        b: DEV_RFID_TAG_CTRL_B,
+        c: DEV_RFID_TAG_CTRL_C,
+        d: DEV_RFID_TAG_CTRL_D,
+      };
+      const tag = tagMap[key];
+      /** Len pri simulovanom tuku — neprepisuje runtime pri iných vstupoch RFID. */
+      applyDevRfidConnectorPresetForTag(tag);
       window.dispatchEvent(new CustomEvent(DEV_RFID_TAP_EVENT, { detail: { tag } }));
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, []);
+  }, [stationRfidModalOpen, applyDevRfidConnectorPresetForTag]);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return;
@@ -672,34 +1717,43 @@ export default function App() {
       rfidTapTimersRef.current = [];
     };
     const onRfidTap = (ev: Event) => {
+      if (Date.now() < rfidDevTapBlockedUntilRef.current) return;
       const detail = (ev as CustomEvent<{ tag?: string; accepted?: boolean }>).detail;
       const tag = detail?.tag;
       let accepted = detail?.accepted;
       if (accepted === undefined) {
-        accepted = tag === DEV_RFID_TAG_CTRL_A;
+        accepted = tag !== DEV_RFID_TAG_CTRL_D;
       }
+      if (tag && isStationOverviewRfidContext) {
+        playRfidTapSound(accepted);
+        openStationRfidFlow(tag);
+        return;
+      }
+      const showMs = RFID_TAP_FEEDBACK_SHOW_MS;
+      rfidDevTapBlockedUntilRef.current =
+        Date.now() + showMs + RFID_MODAL_FADE_OUT_MS + RFID_TAP_POST_MODAL_COOLDOWN_MS;
       playRfidTapSound(accepted);
       clearRfidTapTimers();
       if (accepted) {
         setRfidTapFeedback('ok');
-        const t1 = setTimeout(() => {
-          setRfidTapFeedback(null);
-        }, RFID_TAP_OK_CHECK_MS);
-        rfidTapTimersRef.current.push(t1);
       } else {
         setRfidTapFeedback('reject');
-        const t1 = setTimeout(() => {
-          setRfidTapFeedback(null);
-        }, RFID_TAP_REJECT_MS);
-        rfidTapTimersRef.current.push(t1);
       }
+      setRfidTapModalVisible(true);
+      const tHide = setTimeout(() => {
+        setRfidTapModalVisible(false);
+      }, showMs);
+      const tClear = setTimeout(() => {
+        setRfidTapFeedback(null);
+      }, showMs + RFID_MODAL_FADE_OUT_MS);
+      rfidTapTimersRef.current.push(tHide, tClear);
     };
     window.addEventListener(DEV_RFID_TAP_EVENT, onRfidTap as EventListener);
     return () => {
       window.removeEventListener(DEV_RFID_TAP_EVENT, onRfidTap as EventListener);
       clearRfidTapTimers();
     };
-  }, []);
+  }, [isStationOverviewRfidContext, openStationRfidFlow]);
 
   useEffect(() => {
     return () => {
@@ -716,8 +1770,9 @@ export default function App() {
   }, []);
 
   const clearConnectorSession = useCallback(() => {
+    closeStationRfidFlow();
     setSelectedConnectorId(null);
-  }, []);
+  }, [closeStationRfidFlow]);
 
   /** One place: any pointer down/move on the shell (incl. header) resets the 1 min idle timer. */
   const bumpConnectorScopeActivity = useCallback(() => {
@@ -735,8 +1790,19 @@ export default function App() {
   }, [clearConnectorSession]);
 
   const handleSelectConnector = useCallback((connectorId: string) => {
+    closeStationRfidFlow();
     setSelectedConnectorId(connectorId);
-  }, []);
+  }, [closeStationRfidFlow]);
+
+  /** Pri prepnutí na jednonabíjačku zavri detail druhého konektora (nie je v UI). */
+  useEffect(() => {
+    if (mockDevDualConnectorLayout) return;
+    if (runtimeConnectors.length <= 1) return;
+    const firstId = runtimeConnectors[0]?.id ?? null;
+    if (selectedConnectorId != null && selectedConnectorId !== firstId) {
+      setSelectedConnectorId(null);
+    }
+  }, [mockDevDualConnectorLayout, runtimeConnectors, selectedConnectorId]);
 
   const visibleInfoBlockIds = useMemo(
     () => getVisibleInfoBlockIds(runtimeConnectors),
@@ -746,7 +1812,7 @@ export default function App() {
   const openInfo = (initialHelp?: number | HelpId, returnTarget: Screen = 'home') => {
     const resolvedId =
       initialHelp === undefined
-        ? resolveHelpIdFromContext(effectiveConnectorIdForContext, runtimeConnectors)
+        ? resolveHelpIdFromContext(effectiveConnectorIdForContext, homeUiConnectors)
         : initialHelp;
     const idx = toHelpIndex(resolvedId, visibleInfoBlockIds);
     setInfoBlockIndex(idx);
@@ -803,13 +1869,99 @@ export default function App() {
       prev === 'ok' ? 'connecting' : prev === 'connecting' ? 'offline' : 'ok'
     );
   };
+  const updateServiceConnectorState = useCallback(
+    <K extends keyof ServiceConnectorState>(connectorId: string, key: K, value: ServiceConnectorState[K]) => {
+      setServiceConnectorState((prev) => ({
+        ...prev,
+        [connectorId]: {
+          ...prev[connectorId],
+          [key]: value,
+        },
+      }));
+    },
+    []
+  );
+  const toggleServiceOcppArrayValue = useCallback(
+    (
+      key:
+        | 'MeterValuesAlignedData'
+        | 'MeterValuesSampledData'
+        | 'StopTxnAlignedData'
+        | 'StopTxnSampledData',
+      value: string
+    ) => {
+      setServiceOcppConfig((prev) => {
+        const list = prev[key];
+        const next = list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
+        return { ...prev, [key]: next };
+      });
+    },
+    []
+  );
+  const openServiceConnectorScreen = useCallback(
+    (nextScreen: ServiceConnectorSubscreen, connectorId?: string) => {
+      if (connectorId) setServiceSelectedConnectorId(connectorId);
+      setScreen(nextScreen);
+    },
+    []
+  );
+  const serviceSystemModel = 'Wiseasy P5L SSK';
+  const serviceSystemProduct = 'wiseasy-p5l-ssk';
+  const serviceSystemDeviceId = 'TP-ANDROID-P5L-001';
+  const serviceSystemLocationPoint = 'POINT(48.7332 19.1464)';
+  const serviceMqttConnected = false;
+  const serviceMqttUrl = 'mqtts://mqtt.agevolt.com:8883';
+  const serviceMqttTopicPublish = 'agevolt/touchpoint/out';
+  const serviceMqttTopicSubscribe = 'agevolt/touchpoint/in';
+  const serviceMqttConnectionId = 'tp-socket-01';
+  const serviceMqttDeviceId = mockConfig.station.ocppDeviceId ?? 'TP-SK-HOTEL-001';
+  const serviceMqttUser = 'tp-client';
+  const serviceMqttPassword = 'agevolt-mqtt-secret';
+  const serviceOcppVersion = '1.6J';
+  const serviceOcppDeviceId = mockConfig.station.ocppDeviceId ?? 'TP-SK-HOTEL-001';
+  const serviceOcppBasicAuth = 'tp-basic-auth-secret';
+  const serviceOcppRegistrationAccepted = ocppConnectionState === 'ok';
+  const serviceOcppServerTimeOffsetMs = 126;
+  const serviceOcppHeartbeatIntervalSec = 3600;
+  const serviceOcppBootRetryIntervalSec = 500;
+  const serviceStationBound = Boolean('ST-2026-001');
+  const serviceStationBoundSn = 'ST-2026-001';
+  const serviceStationVendor = 'AgeVolt';
+  const serviceStationModel = 'Touchpoint CSMS';
+  const serviceStationCountry = 'SK';
+  const serviceStationTimeZone = 'Europe/Bratislava';
+  const serviceStationCurrency = mockConfig.station.currency ?? 'EUR';
+  const serviceStationFxToEurRate = 1;
+  const serviceStationVatRate = mockConfig.station.vatRate ?? 0.23;
+  const serviceSystemTotalRxBytes = 123_456_789;
+  const serviceSystemTotalTxBytes = 45_678_123;
+  const serviceSystemTotalRxBytesLast = 12_340_000;
+  const serviceSystemTotalTxBytesLast = 4_560_000;
+  const serviceTpLifecycleState = isNetworkOnline ? 'READY' : 'WAIT_INTERNET';
+  const serviceFirmwareStatus =
+    SERVICE_FIRMWARE_CONNECTOR_MOCK[serviceSelectedConnector?.id ?? '']?.inSync === false ? 'RUNNING' : 'READY';
+  const serviceFirmwareModuleProgress = Object.values(SERVICE_FIRMWARE_CONNECTOR_MOCK).filter(
+    (item) => item.inSync || (item.inSync === false && item.phase === 'waiting')
+  ).length;
 
   const isServiceScreen =
     screen === 'servicePin' ||
-    screen === 'serviceMenu' ||
-    screen === 'serviceL1' ||
-    screen === 'serviceL2' ||
-    screen === 'serviceL3';
+    screen === 'serviceSettings' ||
+    screen === 'serviceSystem' ||
+    screen === 'serviceConnections' ||
+    screen === 'serviceStation' ||
+    screen === 'serviceOperator' ||
+    screen === 'serviceOcppConfig' ||
+    screen === 'serviceFirmware' ||
+    screen === 'serviceConnectors' ||
+    screen === 'serviceConnectorOverview' ||
+    screen === 'serviceConnectorEvm' ||
+    screen === 'serviceConnectorEvmManual' ||
+    screen === 'serviceConnectorElm' ||
+    screen === 'serviceConnectorOcpp' ||
+    screen === 'serviceConnectorPolicy' ||
+    screen === 'serviceConnectorTx' ||
+    screen === 'serviceBrowser';
 
   const resetServicePin = useCallback(() => {
     setServicePinInput('');
@@ -833,7 +1985,7 @@ export default function App() {
     if (logoTapResetTimerRef.current) clearTimeout(logoTapResetTimerRef.current);
     logoTapResetTimerRef.current = setTimeout(() => {
       logoTapCountRef.current = 0;
-    }, 1400);
+    }, LOGO_SERVICE_TAP_GAP_MS);
 
     if (logoTapCountRef.current >= 5) {
       logoTapCountRef.current = 0;
@@ -879,8 +2031,9 @@ export default function App() {
           />
 
           <View style={styles.contentViewport}>
-            <ContentTextScaleContext.Provider value={contentTextScale}>
-              <ContentIconScaleContext.Provider value={contentIconScale}>
+            <ServiceLanguageContext.Provider value={language}>
+              <ContentTextScaleContext.Provider value={contentTextScale}>
+                <ContentIconScaleContext.Provider value={contentIconScale}>
                 <View style={styles.contentZoomLayer}>
               {screen === 'home' && (
                   <View style={styles.homeNoScroll}>
@@ -899,16 +2052,21 @@ export default function App() {
                           stationDeviceId={stationDeviceId}
                           compact={magnifierOn}
                           showStationBack={selectedConnectorId !== null}
-                          onStationHomePress={() => setSelectedConnectorId(null)}
+                          onStationHomePress={clearConnectorSession}
+                          onStationDeviceIdPress={
+                            mockConfig.connectors.length > 1 && selectedConnectorId === null
+                              ? () => setMockDevDualConnectorLayout((prev) => !prev)
+                              : undefined
+                          }
                         >
                           <HomeOverviewScreen
                             lang={language}
-                            connectors={runtimeConnectors}
+                            connectors={homeUiConnectors}
                             currency={mockConfig.station.currency}
                             fallbackChargingLink={chargingLink}
                             selectedConnectorId={selectedConnectorId}
                             onSelectConnector={handleSelectConnector}
-                            onBackToOverview={() => setSelectedConnectorId(null)}
+                            onBackToOverview={clearConnectorSession}
                             onOpenInfoHelp2={() => openInfo('info-2', 'home')}
                             onOpenSupport={() => setScreen('support')}
                             onOpenQr={openQr}
@@ -919,7 +2077,9 @@ export default function App() {
                             onDevCycleConnectorStatus={
                               selectedConnectorId
                                 ? () => cycleMockConnectorStatus(selectedConnectorId)
-                                : undefined
+                                : homeUiConnectors.length === 1 && homeUiConnectors[0]
+                                  ? () => cycleMockConnectorStatus(homeUiConnectors[0].id)
+                                  : undefined
                             }
                           />
                         </StationSection>
@@ -927,6 +2087,838 @@ export default function App() {
                     </ContentTextScaleContext.Provider>
                   </View>
                 )}
+
+              {screen === 'home' && stationRfidModalOpen && stationRfidCard ? (
+                <View style={styles.stationRfidModalRoot}>
+                  <Pressable style={styles.stationRfidModalBackdrop} onPress={closeStationRfidFlow} />
+                  <View style={styles.stationRfidModalShell}>
+                    <ScrollView
+                      style={styles.stationRfidModalCard}
+                      contentContainerStyle={styles.stationRfidModalContent}
+                      showsVerticalScrollIndicator={false}
+                      bounces={false}
+                    >
+                      {stationRfidStep === 'summary' ? (
+                        <>
+                          <View style={styles.stationRfidSummaryCard}>
+                            <View style={styles.stationRfidSummaryTop}>
+                              <View style={styles.stationRfidSummaryUidLine}>
+                                <View style={styles.stationRfidSummaryIconSlot}>
+                                  <AppIcon name="id-card" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                </View>
+                                <FitText
+                                  style={styles.stationRfidSummaryUid}
+                                  numberOfLines={1}
+                                  targetChars={18}
+                                  minScale={0.42}
+                                >
+                                  {stationRfidCard.uid}
+                                </FitText>
+                              </View>
+                              {!stationRfidCard.known ? (
+                                <View style={styles.stationRfidSummaryUnknownBlock}>
+                                  <FitText
+                                    style={styles.stationRfidSummaryUid}
+                                    numberOfLines={1}
+                                    targetChars={20}
+                                    minScale={0.4}
+                                  >
+                                    {t(language, 'rfid.station.cardUnknown')}
+                                  </FitText>
+                                  <FitText
+                                    style={styles.stationRfidSummaryUnknownRoamingLine}
+                                    numberOfLines={2}
+                                    targetChars={36}
+                                    minScale={0.35}
+                                  >
+                                    {t(language, 'rfid.station.cardUnknownRoamingLine')}
+                                  </FitText>
+                                  <StationRfidQuickAction
+                                    label={t(language, 'rfid.station.action.linkCardShort')}
+                                    omitIcon
+                                    onPress={openStationRfidLoginStep}
+                                  />
+                                </View>
+                              ) : null}
+                              {stationRfidCard.known && stationRfidCard.blocked ? (
+                                <View style={styles.stationRfidSummaryBlockedBanner}>
+                                  <View style={styles.stationRfidSummaryUidLine}>
+                                    <View style={styles.stationRfidSummaryLeadIconCol}>
+                                      <AppIcon name="do-not-enter" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                    </View>
+                                    <FitText
+                                      style={styles.stationRfidSummaryUid}
+                                      numberOfLines={2}
+                                      targetChars={24}
+                                      minScale={0.35}
+                                    >
+                                      {t(language, 'rfid.station.cardBlocked')}
+                                    </FitText>
+                                  </View>
+                                </View>
+                              ) : null}
+                              {stationRfidCard.known ? (
+                                <>
+                                  {operatorOwnerName.trim().length > 0 ? (
+                                    <View style={styles.stationRfidSummaryUidLine}>
+                                      <View style={styles.stationRfidSummaryLeadIconCol}>
+                                        <AppIcon name="user-tie" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                      </View>
+                                      <FitText
+                                        style={styles.stationRfidSummaryUid}
+                                        numberOfLines={2}
+                                        targetChars={28}
+                                        minScale={0.35}
+                                      >
+                                        {operatorOwnerName}
+                                      </FitText>
+                                    </View>
+                                  ) : null}
+                                  {(() => {
+                                    const plate = stationRfidSummaryVehicleDriver.plate;
+                                    const vname = stationRfidSummaryVehicleDriver.vehicleName;
+                                    const hasPlate = plate.length > 0;
+                                    const hasName = vname.length > 0;
+                                    if (!hasPlate && !hasName) {
+                                      return null;
+                                    }
+                                    if (hasPlate && hasName) {
+                                      return (
+                                        <View style={styles.stationRfidSummaryUidLine}>
+                                          <View style={styles.stationRfidSummaryLeadIconCol}>
+                                            <AppIcon name="car-side" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                          </View>
+                                          <View style={styles.stationRfidSummaryStackedUidCol}>
+                                            <FitText
+                                              style={styles.stationRfidSummaryPrimaryStackLine}
+                                              numberOfLines={1}
+                                              targetChars={14}
+                                              minScale={0.32}
+                                            >
+                                              {plate}
+                                            </FitText>
+                                            <FitText
+                                              style={styles.stationRfidSummarySecondaryStackLine}
+                                              numberOfLines={2}
+                                              targetChars={36}
+                                              minScale={0.32}
+                                            >
+                                              {vname}
+                                            </FitText>
+                                          </View>
+                                        </View>
+                                      );
+                                    }
+                                    const single = hasPlate ? plate : vname;
+                                    return (
+                                      <View style={styles.stationRfidSummaryUidLine}>
+                                        <View style={styles.stationRfidSummaryLeadIconCol}>
+                                          <AppIcon name="car-side" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                        </View>
+                                        <FitText
+                                          style={styles.stationRfidSummaryUid}
+                                          numberOfLines={2}
+                                          targetChars={36}
+                                          minScale={0.32}
+                                        >
+                                          {single}
+                                        </FitText>
+                                      </View>
+                                    );
+                                  })()}
+                                  {(() => {
+                                    const raw = stationRfidSummaryVehicleDriver.driverEmail.trim();
+                                    const parts = raw ? splitEmailAtSign(raw) : null;
+                                    if (!raw) {
+                                      return null;
+                                    }
+                                    if (!parts) {
+                                      return (
+                                        <View style={styles.stationRfidSummaryUidLine}>
+                                          <View style={styles.stationRfidSummaryLeadIconCol}>
+                                            <AppIcon name="user" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                          </View>
+                                          <FitText
+                                            style={styles.stationRfidSummaryUid}
+                                            numberOfLines={2}
+                                            targetChars={40}
+                                            minScale={0.28}
+                                          >
+                                            {raw}
+                                          </FitText>
+                                        </View>
+                                      );
+                                    }
+                                    return (
+                                      <View style={styles.stationRfidSummaryUidLine}>
+                                        <View style={styles.stationRfidSummaryLeadIconCol}>
+                                          <AppIcon name="user" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                        </View>
+                                        <View style={styles.stationRfidSummaryStackedUidCol}>
+                                          <FitText
+                                            style={styles.stationRfidSummaryPrimaryStackLine}
+                                            numberOfLines={1}
+                                            targetChars={22}
+                                            minScale={0.28}
+                                          >
+                                            {parts.local}
+                                          </FitText>
+                                          <FitText
+                                            style={styles.stationRfidSummarySecondaryStackLine}
+                                            numberOfLines={2}
+                                            targetChars={40}
+                                            minScale={0.28}
+                                          >
+                                            {`@${parts.domain}`}
+                                          </FitText>
+                                        </View>
+                                      </View>
+                                    );
+                                  })()}
+                                </>
+                              ) : null}
+                            </View>
+                          </View>
+
+                          <View
+                            style={[
+                              styles.stationRfidConnectorGrid,
+                              magnifierOn && styles.stationRfidConnectorGridStack,
+                            ]}
+                          >
+                            {stationConnectorDecisions.map((decision) => (
+                              <View
+                                key={decision.connectorId}
+                                style={[
+                                  styles.stationRfidConnectorGridCell,
+                                  magnifierOn && styles.stationRfidConnectorGridCellStack,
+                                ]}
+                              >
+                                <StationRfidConnectorPanel
+                                  lang={language}
+                                  decision={decision}
+                                  cardBlocked={stationRfidCard.known && stationRfidCard.blocked}
+                                  reserveCostRowSlot={
+                                    stationRfidAnyConnectorCostRow && !decision.txTotalCostLabel
+                                  }
+                                  onStart={() => handleStationConnectorStart(decision.connectorId, decision)}
+                                  onStop={() => handleStationConnectorStop(decision.connectorId)}
+                                  onMoreInfo={() => openStationConnectorDetail(decision.connectorId)}
+                                />
+                              </View>
+                            ))}
+                          </View>
+
+                          <View style={styles.stationRfidFooterActions}>
+                            <StationRfidQuickAction
+                              label={t(language, 'rfid.station.action.close')}
+                              icon="times-circle"
+                              onPress={closeStationRfidFlow}
+                            />
+                          </View>
+                        </>
+                      ) : stationRfidStep === 'login' ? (
+                        <View style={styles.stationRfidStepWrap}>
+                          <Text style={styles.stationRfidStepTitle}>{t(language, 'rfid.station.loginTitle')}</Text>
+                          <TextInput
+                            value={stationLoginInput}
+                            onChangeText={(value) => {
+                              setStationLoginInput(value);
+                              setStationLoginError('');
+                            }}
+                            placeholder={t(language, 'rfid.station.loginEmailPlaceholder')}
+                            placeholderTextColor="#6b6b6b"
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            style={styles.stationRfidTextInput}
+                          />
+                          <TextInput
+                            value={stationPasswordInput}
+                            onChangeText={(value) => {
+                              setStationPasswordInput(value);
+                              setStationLoginError('');
+                            }}
+                            placeholder={t(language, 'rfid.station.loginPasswordPlaceholder')}
+                            placeholderTextColor="#6b6b6b"
+                            secureTextEntry
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            style={styles.stationRfidTextInput}
+                          />
+                          {stationLoginError ? (
+                            <Text style={styles.stationRfidErrorText}>{stationLoginError}</Text>
+                          ) : null}
+                          <View style={[styles.stationRfidFooterActions, styles.stationRfidFooterActionsRow]}>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.back')}
+                                omitIcon
+                                stripPosition="left"
+                                onPress={() => {
+                                  setStationLoginError('');
+                                  setStationRfidStep('summary');
+                                }}
+                                secondary
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.continue')}
+                                omitIcon
+                                onPress={handleStationLoginSubmit}
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                          </View>
+                        </View>
+                      ) : stationRfidStep === 'pickSpace' && stationLinkedAccount ? (
+                        <View style={styles.stationRfidStepWrap}>
+                          <View style={styles.stationRfidStepHeadingOuter}>
+                            <View style={styles.stationRfidStepHeadingCluster}>
+                              <AppIcon name="user-tie" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                              <FitText
+                                style={[styles.stationRfidStepTitle, styles.stationRfidStepTitleHeadingClusterText]}
+                                numberOfLines={1}
+                                targetChars={14}
+                                minScale={0.4}
+                              >
+                                {t(language, 'rfid.station.pickSpaceTitle')}
+                              </FitText>
+                            </View>
+                          </View>
+                          <Pressable
+                            accessibilityRole="button"
+                            onPress={() => setStationRfidPicker('space')}
+                            style={({ pressed }) => [
+                              styles.stationRfidCompactSelectRow,
+                              pressed && styles.connectorBubblePressed,
+                            ]}
+                          >
+                            <View style={styles.stationRfidSummaryLeadIconCol}>
+                              <AppIcon name="user-tie" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                            </View>
+                            <FitText
+                              style={[styles.stationRfidPickRowLabel, styles.stationRfidCompactSelectLabel]}
+                              numberOfLines={2}
+                              targetChars={32}
+                              minScale={0.36}
+                            >
+                              {(
+                                stationSpacesForRfid.find((s) => s.id === stationSelectedSpaceId) ??
+                                stationSpacesForRfid[0]
+                              )?.name ?? ''}
+                            </FitText>
+                            <AppIcon name="chevron-down" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                          </Pressable>
+                          <View style={[styles.stationRfidFooterActions, styles.stationRfidFooterActionsRow]}>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.back')}
+                                omitIcon
+                                stripPosition="left"
+                                onPress={() => {
+                                  setStationSpaceSearch('');
+                                  setStationRfidStep('login');
+                                }}
+                                secondary
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.next')}
+                                omitIcon
+                                disabled={!stationSelectedSpaceId && stationSpacesForRfid.length > 0}
+                                onPress={() => {
+                                  const v = stationLinkedAccount.vehicles ?? [];
+                                  if (v.length > 0) {
+                                    setStationVehicleUi({ kind: 'vehicle', vehicleId: v[0].id });
+                                  } else {
+                                    setStationVehicleUi({ kind: 'without' });
+                                  }
+                                  setStationVehicleSearch('');
+                                  setStationRfidStep('pickVehicle');
+                                }}
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                          </View>
+                        </View>
+                      ) : stationRfidStep === 'pickVehicle' && stationLinkedAccount ? (
+                        <View style={styles.stationRfidStepWrap}>
+                          <View style={styles.stationRfidStepHeadingOuter}>
+                            <View style={styles.stationRfidStepHeadingCluster}>
+                              <AppIcon name="car-side" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                              <FitText
+                                style={[styles.stationRfidStepTitle, styles.stationRfidStepTitleHeadingClusterText]}
+                                numberOfLines={1}
+                                targetChars={12}
+                                minScale={0.4}
+                              >
+                                {t(language, 'rfid.station.pickVehicleShortTitle')}
+                              </FitText>
+                            </View>
+                          </View>
+                          {(() => {
+                            const sp = stationSpacesForRfid.find((s) => s.id === stationSelectedSpaceId);
+                            if (!sp) return null;
+                            return (
+                              <View style={styles.stationRfidTitleWithIconRow}>
+                                <View style={styles.stationRfidSummaryLeadIconCol}>
+                                  <AppIcon name="user-tie" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                </View>
+                                <FitText
+                                  style={styles.stationRfidPickRowLabel}
+                                  numberOfLines={2}
+                                  targetChars={30}
+                                  minScale={0.38}
+                                >
+                                  {sp.name}
+                                </FitText>
+                              </View>
+                            );
+                          })()}
+                          {stationVehicleUi ? (
+                            <Pressable
+                              accessibilityRole="button"
+                              onPress={() => setStationRfidPicker('vehicle')}
+                              style={({ pressed }) => [
+                                styles.stationRfidCompactSelectRow,
+                                stationRfidPickVehicleCompactTwoLines && styles.stationRfidCompactSelectRowTwoLine,
+                                pressed && styles.connectorBubblePressed,
+                              ]}
+                            >
+                              {stationVehicleUi.kind === 'without' ? (
+                                <View style={styles.stationRfidSummaryLeadIconCol}>
+                                  <AppIcon name="do-not-enter" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                </View>
+                              ) : (
+                                <View style={styles.stationRfidSummaryLeadIconCol}>
+                                  <AppIcon name="car" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                </View>
+                              )}
+                              {stationVehicleUi.kind === 'without' ? (
+                                <FitText
+                                  style={[styles.stationRfidPickRowLabel, styles.stationRfidCompactSelectLabel]}
+                                  numberOfLines={2}
+                                  targetChars={36}
+                                  minScale={0.34}
+                                >
+                                  {t(language, 'rfid.station.withoutVehicle')}
+                                </FitText>
+                              ) : (() => {
+                                  const veh = stationLinkedAccount.vehicles.find(
+                                    (x) => x.id === stationVehicleUi.vehicleId
+                                  );
+                                  const plate = (veh?.plate ?? '').trim();
+                                  const name = (veh?.name ?? '').trim();
+                                  if (plate.length > 0 && name.length > 0) {
+                                    return (
+                                      <View style={styles.stationRfidCompactSelectVehicleStack}>
+                                        <FitText
+                                          style={styles.stationRfidCompactSelectVehiclePlateLine}
+                                          numberOfLines={1}
+                                          targetChars={14}
+                                          minScale={0.32}
+                                        >
+                                          {plate}
+                                        </FitText>
+                                        <FitText
+                                          style={styles.stationRfidCompactSelectVehicleNameLine}
+                                          numberOfLines={2}
+                                          targetChars={36}
+                                          minScale={0.32}
+                                        >
+                                          {name}
+                                        </FitText>
+                                      </View>
+                                    );
+                                  }
+                                  const single = plate.length > 0 ? plate : name;
+                                  return (
+                                    <FitText
+                                      style={[styles.stationRfidPickRowLabel, styles.stationRfidCompactSelectLabel]}
+                                      numberOfLines={2}
+                                      targetChars={36}
+                                      minScale={0.34}
+                                    >
+                                      {single.length > 0 ? single : '—'}
+                                    </FitText>
+                                  );
+                                })()}
+                              <AppIcon name="chevron-down" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                            </Pressable>
+                          ) : null}
+                          <View style={styles.stationRfidFooterActions}>
+                            <StationRfidQuickAction
+                              label={t(language, 'rfid.station.action.createVehicle')}
+                              omitIcon
+                              onPress={() => setStationRfidStep('createVehicle')}
+                              style={styles.stationRfidFooterRowAction}
+                            />
+                            <StationRfidQuickAction
+                              label={t(language, 'rfid.station.withoutVehicle')}
+                              omitIcon
+                              onPress={() => {
+                                setStationVehicleUi({ kind: 'without' });
+                                setStationPendingLink({ vehicleId: null, blocked: true });
+                                setStationRfidStep('confirmLink');
+                              }}
+                              style={styles.stationRfidFooterRowAction}
+                            />
+                          </View>
+                          <View style={[styles.stationRfidFooterActions, styles.stationRfidFooterActionsRow]}>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.back')}
+                                omitIcon
+                                stripPosition="left"
+                                onPress={() => {
+                                  setStationVehicleSearch('');
+                                  setStationRfidStep('pickSpace');
+                                }}
+                                secondary
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.next')}
+                                omitIcon
+                                disabled={stationVehicleUi == null}
+                                onPress={() => {
+                                  if (!stationVehicleUi) return;
+                                  if (stationVehicleUi.kind === 'without') {
+                                    setStationPendingLink({ vehicleId: null, blocked: true });
+                                  } else {
+                                    setStationPendingLink({
+                                      vehicleId: stationVehicleUi.vehicleId,
+                                      blocked: false,
+                                    });
+                                  }
+                                  setStationRfidStep('confirmLink');
+                                }}
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                          </View>
+                        </View>
+                      ) : stationRfidStep === 'confirmLink' && stationLinkedAccount && stationPendingLink ? (
+                        <View style={styles.stationRfidStepWrap}>
+                          <Text style={styles.stationRfidStepTitle}>
+                            {t(language, 'rfid.station.confirmSaveTitle')}
+                          </Text>
+                          {(() => {
+                            const spName =
+                              stationSpacesForRfid.find((s) => s.id === stationSelectedSpaceId)?.name ?? '';
+                            const veh =
+                              stationPendingLink.vehicleId != null
+                                ? stationLinkedAccount.vehicles.find(
+                                    (v) => v.id === stationPendingLink.vehicleId
+                                  ) ?? null
+                                : null;
+                            const showBlocked = stationPendingLink.blocked || !veh;
+                            return (
+                              <View style={styles.stationRfidConfirmSummary}>
+                                <View style={styles.stationRfidConfirmIconRow}>
+                                  <View style={styles.stationRfidSummaryLeadIconCol}>
+                                    <AppIcon name="user-tie" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                  </View>
+                                  <FitText
+                                    style={[styles.stationRfidPickRowLabel, styles.stationRfidConfirmSummaryText]}
+                                    numberOfLines={2}
+                                    targetChars={28}
+                                    minScale={0.36}
+                                  >
+                                    {spName}
+                                  </FitText>
+                                </View>
+                                <View style={styles.stationRfidConfirmIconRow}>
+                                  <View style={styles.stationRfidSummaryLeadIconCol}>
+                                    <AppIcon name="car-side" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+                                  </View>
+                                  <View style={styles.stationRfidConfirmVehicleTextCol}>
+                                    {showBlocked ? (
+                                      <>
+                                        <FitText
+                                          style={styles.stationRfidConfirmVehicleLine}
+                                          numberOfLines={2}
+                                          targetChars={24}
+                                          minScale={0.36}
+                                        >
+                                          {t(language, 'rfid.station.withoutVehicle')}
+                                        </FitText>
+                                        <FitText
+                                          style={styles.stationRfidConfirmVehicleSubline}
+                                          numberOfLines={2}
+                                          targetChars={20}
+                                          minScale={0.36}
+                                        >
+                                          {t(language, 'rfid.station.confirmBlockedStatus')}
+                                        </FitText>
+                                      </>
+                                    ) : veh ? (
+                                      (() => {
+                                        const plateT = (veh.plate ?? '').trim();
+                                        const nameT = (veh.name ?? '').trim();
+                                        if (plateT.length > 0 && nameT.length > 0) {
+                                          return (
+                                            <>
+                                              <FitText
+                                                style={styles.stationRfidConfirmVehicleLine}
+                                                numberOfLines={1}
+                                                targetChars={16}
+                                                minScale={0.38}
+                                              >
+                                                {plateT}
+                                              </FitText>
+                                              <FitText
+                                                style={styles.stationRfidConfirmVehicleSubline}
+                                                numberOfLines={2}
+                                                targetChars={32}
+                                                minScale={0.34}
+                                              >
+                                                {nameT}
+                                              </FitText>
+                                            </>
+                                          );
+                                        }
+                                        if (plateT.length > 0) {
+                                          return (
+                                            <FitText
+                                              style={styles.stationRfidConfirmVehicleLine}
+                                              numberOfLines={2}
+                                              targetChars={28}
+                                              minScale={0.36}
+                                            >
+                                              {plateT}
+                                            </FitText>
+                                          );
+                                        }
+                                        if (nameT.length > 0) {
+                                          return (
+                                            <FitText
+                                              style={styles.stationRfidConfirmVehicleLine}
+                                              numberOfLines={2}
+                                              targetChars={36}
+                                              minScale={0.34}
+                                            >
+                                              {nameT}
+                                            </FitText>
+                                          );
+                                        }
+                                        return null;
+                                      })()
+                                    ) : null}
+                                  </View>
+                                </View>
+                              </View>
+                            );
+                          })()}
+                          <View style={[styles.stationRfidFooterActions, styles.stationRfidFooterActionsRow]}>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.back')}
+                                omitIcon
+                                stripPosition="left"
+                                onPress={() => {
+                                  setStationPendingLink(null);
+                                  setStationRfidStep('pickVehicle');
+                                }}
+                                secondary
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.confirmSave')}
+                                icon="save"
+                                onPress={() => {
+                                  if (!stationLinkedAccountId) return;
+                                  applyStationCardLink(stationLinkedAccountId, stationPendingLink.vehicleId, {
+                                    blocked: stationPendingLink.blocked,
+                                    spaceId: stationSelectedSpaceId,
+                                  });
+                                }}
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                          </View>
+                        </View>
+                      ) : stationRfidStep === 'createVehicle' ? (
+                        <View style={styles.stationRfidStepWrap}>
+                          <Text style={styles.stationRfidStepTitle}>
+                            {t(language, 'rfid.station.createVehicleTitle')}
+                          </Text>
+                          <TextInput
+                            value={stationCreatePlate}
+                            onChangeText={(value) => {
+                              setStationCreatePlate(value);
+                              setStationCreateError('');
+                            }}
+                            placeholder={t(language, 'rfid.station.createVehiclePlate')}
+                            placeholderTextColor="#6b6b6b"
+                            autoCapitalize="characters"
+                            autoCorrect={false}
+                            style={styles.stationRfidTextInput}
+                          />
+                          <TextInput
+                            value={stationCreateVehicleName}
+                            onChangeText={(value) => {
+                              setStationCreateVehicleName(value);
+                              setStationCreateError('');
+                            }}
+                            placeholder={t(language, 'rfid.station.createVehicleName')}
+                            placeholderTextColor="#6b6b6b"
+                            autoCorrect={false}
+                            style={styles.stationRfidTextInput}
+                          />
+                          {stationCreateError ? (
+                            <Text style={styles.stationRfidErrorText}>{stationCreateError}</Text>
+                          ) : null}
+                          <View style={[styles.stationRfidFooterActions, styles.stationRfidFooterActionsRow]}>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.back')}
+                                omitIcon
+                                stripPosition="left"
+                                onPress={() => setStationRfidStep('pickVehicle')}
+                                secondary
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                            <View style={styles.stationRfidFooterRowActionCell}>
+                              <StationRfidQuickAction
+                                label={t(language, 'rfid.station.action.next')}
+                                omitIcon
+                                onPress={handleStationCreateVehicle}
+                                style={styles.stationRfidFooterRowAction}
+                              />
+                            </View>
+                          </View>
+                        </View>
+                      ) : null}
+                    </ScrollView>
+                    <Modal
+                      visible={stationRfidPicker === 'space'}
+                      animationType="slide"
+                      onRequestClose={() => {
+                        setStationRfidPicker(null);
+                        setStationSpaceSearch('');
+                      }}
+                    >
+                      <View style={styles.stationRfidPickerModalRoot}>
+                        <Text style={styles.stationRfidPickerModalTitle}>
+                          {t(language, 'rfid.station.pickSpacePickerTitle')}
+                        </Text>
+                        <TextInput
+                          value={stationSpaceSearch}
+                          onChangeText={setStationSpaceSearch}
+                          placeholder={t(language, 'rfid.station.searchSpaces')}
+                          placeholderTextColor="#6b6b6b"
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                          style={styles.stationRfidTextInput}
+                        />
+                        <ScrollView
+                          style={styles.stationRfidPickerModalScroll}
+                          contentContainerStyle={styles.stationRfidPickerModalScrollContent}
+                          keyboardShouldPersistTaps="handled"
+                          showsVerticalScrollIndicator={false}
+                        >
+                          {stationSpacesForRfid
+                            .filter((s) =>
+                              s.name.toLowerCase().includes(stationSpaceSearch.trim().toLowerCase())
+                            )
+                            .map((space) => (
+                              <StationRfidQuickAction
+                                key={space.id}
+                                label={space.name}
+                                icon="user-tie"
+                                onPress={() => {
+                                  setStationSelectedSpaceId(space.id);
+                                  setStationRfidPicker(null);
+                                  setStationSpaceSearch('');
+                                }}
+                              />
+                            ))}
+                        </ScrollView>
+                        <StationRfidQuickAction
+                          label={t(language, 'rfid.station.action.back')}
+                          omitIcon
+                          stripPosition="left"
+                          onPress={() => {
+                            setStationRfidPicker(null);
+                            setStationSpaceSearch('');
+                          }}
+                          secondary
+                        />
+                      </View>
+                    </Modal>
+                    <Modal
+                      visible={stationRfidPicker === 'vehicle'}
+                      animationType="slide"
+                      onRequestClose={() => {
+                        setStationRfidPicker(null);
+                        setStationVehicleSearch('');
+                      }}
+                    >
+                      <View style={styles.stationRfidPickerModalRoot}>
+                        <Text style={styles.stationRfidPickerModalTitle}>
+                          {t(language, 'rfid.station.pickVehiclePickerTitle')}
+                        </Text>
+                        <TextInput
+                          value={stationVehicleSearch}
+                          onChangeText={setStationVehicleSearch}
+                          placeholder={t(language, 'rfid.station.searchVehicles')}
+                          placeholderTextColor="#6b6b6b"
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                          style={styles.stationRfidTextInput}
+                        />
+                        <ScrollView
+                          style={styles.stationRfidPickerModalScroll}
+                          contentContainerStyle={styles.stationRfidPickerModalScrollContent}
+                          keyboardShouldPersistTaps="handled"
+                          showsVerticalScrollIndicator={false}
+                        >
+                          {(stationLinkedAccount?.vehicles ?? [])
+                            .filter((v) => {
+                              const q = stationVehicleSearch.trim().toLowerCase();
+                              if (!q) return true;
+                              return (
+                                v.plate.toLowerCase().includes(q) ||
+                                (v.name ?? '').toLowerCase().includes(q)
+                              );
+                            })
+                            .map((vehicle) => (
+                              <StationRfidPickerVehicleRow
+                                key={vehicle.id}
+                                vehicle={vehicle}
+                                onPress={() => {
+                                  setStationVehicleUi({ kind: 'vehicle', vehicleId: vehicle.id });
+                                  setStationRfidPicker(null);
+                                  setStationVehicleSearch('');
+                                }}
+                              />
+                            ))}
+                        </ScrollView>
+                        <StationRfidQuickAction
+                          label={t(language, 'rfid.station.action.back')}
+                          omitIcon
+                          stripPosition="left"
+                          onPress={() => {
+                            setStationRfidPicker(null);
+                            setStationVehicleSearch('');
+                          }}
+                          secondary
+                        />
+                      </View>
+                    </Modal>
+                  </View>
+                </View>
+              ) : null}
 
               {screen === 'language' && (
                 <FullscreenOverlay
@@ -1057,8 +3049,12 @@ export default function App() {
                 <FullscreenOverlay
                   title={t(language, 'service.menu.title')}
                   scrollVertical={false}
-                  onClose={() => undefined}
-                  showCloseButton={false}
+                  onClose={() => {
+                    resetServicePin();
+                    setScreen('home');
+                  }}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
                 >
                   <ServicePinContent
                     title={t(language, 'service.pinPrompt')}
@@ -1076,7 +3072,7 @@ export default function App() {
                     onSubmit={() => {
                       if (servicePinInput === SERVICE_PIN) {
                         resetServicePin();
-                        setScreen('serviceMenu');
+                        setScreen('serviceSettings');
                         return;
                       }
                       setServicePinError(t(language, 'connector.session.pinWrong'));
@@ -1085,100 +3081,621 @@ export default function App() {
                 </FullscreenOverlay>
               )}
 
-              {screen === 'serviceMenu' && (
+              {screen === 'serviceSettings' && (
                 <FullscreenOverlay
                   title={t(language, 'service.menu.title')}
-                  scrollVertical={SCREEN_SCROLL_VERTICAL.support}
-                  onClose={() => undefined}
-                  showCloseButton={false}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('home')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
                 >
-                  <ServiceMenuList
-                    items={[
-                      {
-                        id: 'service.l1',
-                        title: 'Komunikácia a sieť',
-                        onPress: () => setScreen('serviceL1'),
-                      },
-                      {
-                        id: 'service.quick',
-                        title: 'Rýchly test portu',
-                        onPress: () => setScreen('serviceL1'),
-                      },
-                    ]}
-                  />
+                  <View style={styles.infoReaderScrollInner}>
+                    <StationRfidQuickAction icon="desktop" label="System" onPress={() => setScreen('serviceSystem')} />
+                    <StationRfidQuickAction
+                      icon="network-wired"
+                      label="Pripojenia"
+                      onPress={() => setScreen('serviceConnections')}
+                    />
+                    <StationRfidQuickAction icon="charging-station" label="Stanica" onPress={() => setScreen('serviceStation')} />
+                    <StationRfidQuickAction icon="user-tie" label="Operátor" onPress={() => setScreen('serviceOperator')} />
+                    <StationRfidQuickAction icon="sliders-h" label="OCPP" onPress={() => setScreen('serviceOcppConfig')} />
+                    <StationRfidQuickAction icon="microchip" label="Firmware update" onPress={() => setScreen('serviceFirmware')} />
+                    <StationRfidQuickAction icon="plug" label="Konektory" onPress={() => setScreen('serviceConnectors')} />
+                  </View>
                 </FullscreenOverlay>
               )}
 
-              {screen === 'serviceL1' && (
+              {screen === 'serviceSystem' && (
                 <FullscreenOverlay
-                  title="Komunikácia a sieť"
-                  scrollVertical={SCREEN_SCROLL_VERTICAL.support}
-                  onClose={() => setScreen('serviceMenu')}
+                  title="System"
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceSettings')}
                   useBackButton
                   backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
                 >
-                  <ServiceMenuList
-                    items={[
-                      {
-                        id: 'service.l2',
-                        title: 'OCPP a synchronizácia',
-                        onPress: () => setScreen('serviceL2'),
-                      },
-                      {
-                        id: 'service.l2b',
-                        title: 'Diagnostika spojenia',
-                        onPress: () => setScreen('serviceL2'),
-                      },
-                    ]}
-                  />
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="1.1 Zariadenie">
+                      <ServiceReadRow label="system.model" value={serviceSystemModel} />
+                      <ServiceReadRow label="system.product" value={serviceSystemProduct} />
+                      <ServiceReadRow label="system.deviceId" value={serviceSystemDeviceId} />
+                      <ServiceReadRow label="system.tpLifecycleState" value={serviceTpLifecycleState} />
+                    </ServiceSectionCard>
+                    <ServiceSectionCard title="1.2 Sieť a stav">
+                      <ServiceStatusRow label="system.online" on={isNetworkOnline} />
+                      <ServiceReadRow label="system.activeNetwork" value={networkType.toUpperCase()} />
+                      <ServiceStatusRow label="system.dataMetered" on={networkType === '4g'} />
+                      <ServiceStatusRow label="system.cellular.internet" on={networkType === '4g' && isNetworkOnline} />
+                      <ServiceStatusRow label="system.wifi.internet" on={networkType === 'wifi' && isNetworkOnline} />
+                      <ServiceStatusRow label="system.ethernet.internet" on={networkType === 'eth' && isNetworkOnline} />
+                      <ServiceStatusRow label="system.ocppConnected" on={ocppConnectionState === 'ok'} />
+                      <ServiceStatusRow label="system.mqttConnected" on={serviceMqttConnected} />
+                      <ServiceStatusRow label="system.rs485ready" on={true} />
+                    </ServiceSectionCard>
+                    <ServiceSectionCard title="1.3 Prenos a poloha">
+                      <ServiceReadRow label="system.stat.net.totalRxBytes" value={formatServiceNumber(language, serviceSystemTotalRxBytes)} />
+                      <ServiceReadRow label="system.stat.net.totalTxBytes" value={formatServiceNumber(language, serviceSystemTotalTxBytes)} />
+                      <ServiceReadRow label="system.stat.net.totalRxBytesLast" value={formatServiceNumber(language, serviceSystemTotalRxBytesLast)} />
+                      <ServiceReadRow label="system.stat.net.totalTxBytesLast" value={formatServiceNumber(language, serviceSystemTotalTxBytesLast)} />
+                      <ServiceReadRow label="system.location.point" value={serviceSystemLocationPoint} targetChars={56} />
+                    </ServiceSectionCard>
+                  </View>
                 </FullscreenOverlay>
               )}
 
-              {screen === 'serviceL2' && (
+              {screen === 'serviceConnections' && (
                 <FullscreenOverlay
-                  title="OCPP a synchronizácia"
-                  scrollVertical={SCREEN_SCROLL_VERTICAL.support}
-                  onClose={() => setScreen('serviceL1')}
+                  title="Pripojenia"
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceSettings')}
                   useBackButton
                   backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
                 >
-                  <ServiceMenuList
-                    items={[
-                      {
-                        id: 'service.l3',
-                        title: 'Offline cache a reset',
-                        onPress: () => setScreen('serviceL3'),
-                      },
-                      {
-                        id: 'service.l3b',
-                        title: 'Export diagnostiky',
-                        onPress: () => setScreen('serviceL3'),
-                      },
-                    ]}
-                  />
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="2.1 MQTT">
+                      <ServiceReadRow label="connectivity.mqtt.url" value={serviceMqttUrl} targetChars={64} />
+                      <ServiceReadRow label="connectivity.mqtt.topicPublish" value={serviceMqttTopicPublish} targetChars={64} />
+                      <ServiceReadRow label="connectivity.mqtt.topicSubscribe" value={serviceMqttTopicSubscribe} targetChars={64} />
+                      <ServiceReadRow label="connectivity.mqtt.connectionId" value={serviceMqttConnectionId} />
+                      <ServiceReadRow label="connectivity.mqtt.deviceId" value={serviceMqttDeviceId} />
+                      <ServiceReadRow label="connectivity.mqtt.user" value={serviceMqttUser} />
+                      <ServiceReadRow label="connectivity.mqtt.password" value={serviceMqttPassword} />
+                    </ServiceSectionCard>
+                    <ServiceSectionCard title="2.2 OCPP spojenie a runtime">
+                      <ServiceReadRow label="connectivity.ocpp.version" value={serviceOcppVersion} />
+                      <ServiceReadRow label="connectivity.ocpp.url" value={integrationsOcppWsUrlLine} targetChars={64} />
+                      <ServiceReadRow label="connectivity.ocpp.deviceId" value={serviceOcppDeviceId} />
+                      <ServiceReadRow label="connectivity.ocpp.basicAuth" value={serviceOcppBasicAuth} />
+                      <ServiceStatusRow label="connectivity.ocpp.registrationAccepted" on={serviceOcppRegistrationAccepted} />
+                      <ServiceReadRow label="connectivity.ocpp.serverTimeOffsetMs" value={formatServiceNumber(language, serviceOcppServerTimeOffsetMs)} />
+                      <ServiceReadRow label="connectivity.ocpp.heartbeatIntervalSec" value={formatServiceNumber(language, serviceOcppHeartbeatIntervalSec)} />
+                      <ServiceReadRow label="connectivity.ocpp.bootRetryIntervalSec" value={formatServiceNumber(language, serviceOcppBootRetryIntervalSec)} />
+                    </ServiceSectionCard>
+                  </View>
                 </FullscreenOverlay>
               )}
 
-              {screen === 'serviceL3' && (
+              {screen === 'serviceStation' && (
                 <FullscreenOverlay
-                  title="Offline cache a reset"
-                  scrollVertical={SCREEN_SCROLL_VERTICAL.support}
-                  onClose={() => setScreen('serviceL2')}
+                  title="Stanica"
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceSettings')}
                   useBackButton
                   backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
                 >
-                  <ServiceFinalContent />
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="3.1 Väzba a identita stanice">
+                      <ServiceStatusRow label="system.stationBound" on={serviceStationBound} />
+                      <ServiceReadRow label="station.boundSn" value={serviceStationBoundSn} />
+                      <ServiceReadRow label="station.vendor" value={serviceStationVendor} />
+                      <ServiceReadRow label="station.model" value={serviceStationModel} />
+                    </ServiceSectionCard>
+                    <ServiceSectionCard title="3.2 Región, jazyk a meranie">
+                      <ServiceReadRow label="station.country" value={serviceStationCountry} />
+                      <ServiceSelectRow
+                        label="station.defaultLanguage"
+                        value={serviceStationDefaultLanguage}
+                        onPress={() => {
+                          const next = cycleValue(SERVICE_LANGUAGE_OPTIONS, serviceStationDefaultLanguage);
+                          setServiceStationDefaultLanguage(next);
+                          setLanguage(next);
+                        }}
+                      />
+                      <ServiceReadRow label="station.timeZone" value={serviceStationTimeZone} />
+                      <ServiceReadRow label="station.currency" value={serviceStationCurrency} />
+                      <ServiceReadRow label="station.fxToEurRate" value={formatServiceNumber(language, serviceStationFxToEurRate, 2)} />
+                      <ServiceReadRow label="station.vatRate" value={formatServiceNumber(language, serviceStationVatRate, 2)} />
+                      <ServiceToggleRow
+                        label="station.modbusMeter"
+                        on={serviceStationModbusMeter}
+                        onToggle={() => setServiceStationModbusMeter((value) => !value)}
+                      />
+                      <ServiceInputRow
+                        label="station.meterS0count"
+                        value={String(serviceStationMeterS0count)}
+                        onChangeText={(value) => setServiceStationMeterS0count(Number(value.replace(/[^\d]/g, '')) || 0)}
+                        keyboardType="numeric"
+                      />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceOperator' && (
+                <FullscreenOverlay
+                  title="Operátor"
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceSettings')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="4.1 Kontakt a odkazy">
+                      <ServiceToggleRow
+                        label="operator.paymentAllowed"
+                        on={serviceOperatorPaymentAllowed}
+                        onToggle={() => setServiceOperatorPaymentAllowed((value) => !value)}
+                      />
+                      <ServiceInputRow label="operator.owner.name" value={serviceOperatorOwnerName} onChangeText={setServiceOperatorOwnerName} />
+                      <ServiceInputRow
+                        label="operator.helpdeskNumber"
+                        value={serviceOperatorHelpdeskNumber}
+                        onChangeText={setServiceOperatorHelpdeskNumber}
+                        keyboardType="phone-pad"
+                      />
+                      <ServiceInputRow label="operator.appleStoreLink" value={serviceOperatorAppleStoreLink} onChangeText={setServiceOperatorAppleStoreLink} />
+                      <ServiceInputRow label="operator.androidStoreLink" value={serviceOperatorAndroidStoreLink} onChangeText={setServiceOperatorAndroidStoreLink} />
+                      <ServiceInputRow label="operator.chargingLink" value={serviceOperatorChargingLink} onChangeText={setServiceOperatorChargingLink} />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceOcppConfig' && (
+                <FullscreenOverlay
+                  title="OCPP"
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceSettings')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="5.1 Autorizácia">
+                      <ServiceToggleRow label="connectivity.ocpp.key.AllowOfflineTxForUnknownId" on={serviceOcppConfig.AllowOfflineTxForUnknownId} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, AllowOfflineTxForUnknownId: !prev.AllowOfflineTxForUnknownId }))} />
+                      <ServiceToggleRow label="connectivity.ocpp.key.AuthorizationCacheEnabled" on={serviceOcppConfig.AuthorizationCacheEnabled} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, AuthorizationCacheEnabled: !prev.AuthorizationCacheEnabled }))} />
+                      <ServiceToggleRow label="connectivity.ocpp.key.AuthorizeRemoteTxRequests" on={serviceOcppConfig.AuthorizeRemoteTxRequests} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, AuthorizeRemoteTxRequests: !prev.AuthorizeRemoteTxRequests }))} />
+                      <ServiceToggleRow label="connectivity.ocpp.key.LocalAuthorizeOffline" on={serviceOcppConfig.LocalAuthorizeOffline} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, LocalAuthorizeOffline: !prev.LocalAuthorizeOffline }))} />
+                      <ServiceToggleRow label="connectivity.ocpp.key.LocalPreAuthorize" on={serviceOcppConfig.LocalPreAuthorize} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, LocalPreAuthorize: !prev.LocalPreAuthorize }))} />
+                      <ServiceToggleRow label="connectivity.ocpp.key.LocalAuthListEnabled" on={serviceOcppConfig.LocalAuthListEnabled} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, LocalAuthListEnabled: !prev.LocalAuthListEnabled }))} />
+                      <ServiceReadRow label="connectivity.ocpp.key.LocalAuthListMaxLength" value={formatServiceNumber(language, serviceOcppConfig.LocalAuthListMaxLength)} />
+                      <ServiceReadRow label="connectivity.ocpp.key.SendLocalListMaxLength" value={formatServiceNumber(language, serviceOcppConfig.SendLocalListMaxLength)} />
+                      <ServiceInputRow label="connectivity.ocpp.key.MaxEnergyOnInvalidId" value={String(serviceOcppConfig.MaxEnergyOnInvalidId)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, MaxEnergyOnInvalidId: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceToggleRow label="connectivity.ocpp.key.StopTransactionOnInvalidId" on={serviceOcppConfig.StopTransactionOnInvalidId} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, StopTransactionOnInvalidId: !prev.StopTransactionOnInvalidId }))} />
+                    </ServiceSectionCard>
+                    <ServiceSectionCard title="5.2 Timery a retry">
+                      <ServiceInputRow label="connectivity.ocpp.key.BlinkRepeat" value={String(serviceOcppConfig.BlinkRepeat)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, BlinkRepeat: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.ClockAlignedDataInterval" value={String(serviceOcppConfig.ClockAlignedDataInterval)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, ClockAlignedDataInterval: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.ConnectionTimeOut" value={String(serviceOcppConfig.ConnectionTimeOut)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, ConnectionTimeOut: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceReadRow label="connectivity.ocpp.key.GetConfigurationMaxKeys" value={formatServiceNumber(language, serviceOcppConfig.GetConfigurationMaxKeys)} />
+                      <ServiceInputRow label="connectivity.ocpp.key.HeartbeatInterval" value={String(serviceOcppConfig.HeartbeatInterval)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, HeartbeatInterval: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.LightIntensity" value={String(serviceOcppConfig.LightIntensity)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, LightIntensity: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.MeterValueSampleInterval" value={String(serviceOcppConfig.MeterValueSampleInterval)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, MeterValueSampleInterval: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.MinimumStatusDuration" value={String(serviceOcppConfig.MinimumStatusDuration)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, MinimumStatusDuration: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.ResetRetries" value={String(serviceOcppConfig.ResetRetries)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, ResetRetries: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.TransactionMessageAttempts" value={String(serviceOcppConfig.TransactionMessageAttempts)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, TransactionMessageAttempts: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.TransactionMessageRetryInterval" value={String(serviceOcppConfig.TransactionMessageRetryInterval)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, TransactionMessageRetryInterval: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                      <ServiceInputRow label="connectivity.ocpp.key.WebSocketPingInterval" value={String(serviceOcppConfig.WebSocketPingInterval)} onChangeText={(value) => setServiceOcppConfig((prev) => ({ ...prev, WebSocketPingInterval: Number(value.replace(/[^\d]/g, '')) || 0 }))} keyboardType="numeric" />
+                    </ServiceSectionCard>
+                    <ServiceSectionCard title="5.3 Metering payloady">
+                      <ServiceChipsRow label="connectivity.ocpp.key.MeterValuesAlignedData" values={serviceOcppConfig.MeterValuesAlignedData} options={SERVICE_OCPP_MEASURAND_OPTIONS} editable onToggle={(value) => toggleServiceOcppArrayValue('MeterValuesAlignedData', value)} />
+                      <ServiceReadRow label="connectivity.ocpp.key.MeterValuesAlignedDataMaxLength" value={formatServiceNumber(language, serviceOcppConfig.MeterValuesAlignedDataMaxLength)} />
+                      <ServiceChipsRow label="connectivity.ocpp.key.MeterValuesSampledData" values={serviceOcppConfig.MeterValuesSampledData} options={SERVICE_OCPP_MEASURAND_OPTIONS} editable onToggle={(value) => toggleServiceOcppArrayValue('MeterValuesSampledData', value)} />
+                      <ServiceReadRow label="connectivity.ocpp.key.MeterValuesSampledDataMaxLength" value={formatServiceNumber(language, serviceOcppConfig.MeterValuesSampledDataMaxLength)} />
+                      <ServiceChipsRow label="connectivity.ocpp.key.StopTxnAlignedData" values={serviceOcppConfig.StopTxnAlignedData} options={SERVICE_OCPP_MEASURAND_OPTIONS} editable onToggle={(value) => toggleServiceOcppArrayValue('StopTxnAlignedData', value)} />
+                      <ServiceReadRow label="connectivity.ocpp.key.StopTxnAlignedDataMaxLength" value={formatServiceNumber(language, serviceOcppConfig.StopTxnAlignedDataMaxLength)} />
+                      <ServiceChipsRow label="connectivity.ocpp.key.StopTxnSampledData" values={serviceOcppConfig.StopTxnSampledData} options={SERVICE_OCPP_MEASURAND_OPTIONS} editable onToggle={(value) => toggleServiceOcppArrayValue('StopTxnSampledData', value)} />
+                      <ServiceReadRow label="connectivity.ocpp.key.StopTxnSampledDataMaxLength" value={formatServiceNumber(language, serviceOcppConfig.StopTxnSampledDataMaxLength)} />
+                    </ServiceSectionCard>
+                    <ServiceSectionCard title="5.4 Konektory a fázy">
+                      <ServiceReadRow label="connectivity.ocpp.key.NumberOfConnectors" value={formatServiceNumber(language, serviceOcppConfig.NumberOfConnectors)} />
+                      {runtimeConnectors.map((connector) => (
+                        <ServiceSelectRow
+                          key={`phase-${connector.id}`}
+                          label={`connectivity.ocpp.key.ConnectorPhaseRotation.${connector.parkingSpot}`}
+                          value={serviceConnectorState[connector.id]?.connectorPhaseRotation ?? 'Unknown'}
+                          onPress={() =>
+                            updateServiceConnectorState(
+                              connector.id,
+                              'connectorPhaseRotation',
+                              cycleValue(
+                                SERVICE_CONNECTOR_PHASE_ROTATION_OPTIONS,
+                                serviceConnectorState[connector.id]?.connectorPhaseRotation ?? 'Unknown'
+                              )
+                            )
+                          }
+                        />
+                      ))}
+                      <ServiceReadRow label="connectivity.ocpp.key.ConnectorPhaseRotationMaxLength" value={formatServiceNumber(language, serviceOcppConfig.ConnectorPhaseRotationMaxLength)} />
+                      <ServiceToggleRow label="connectivity.ocpp.key.StopTransactionOnEVSideDisconnect" on={serviceOcppConfig.StopTransactionOnEVSideDisconnect} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, StopTransactionOnEVSideDisconnect: !prev.StopTransactionOnEVSideDisconnect }))} />
+                      <ServiceToggleRow label="connectivity.ocpp.key.UnlockConnectorOnEVSideDisconnect" on={serviceOcppConfig.UnlockConnectorOnEVSideDisconnect} onToggle={() => setServiceOcppConfig((prev) => ({ ...prev, UnlockConnectorOnEVSideDisconnect: !prev.UnlockConnectorOnEVSideDisconnect }))} />
+                      <ServiceChipsRow label="connectivity.ocpp.key.SupportedFeatureProfiles" values={serviceOcppConfig.SupportedFeatureProfiles} />
+                      <ServiceReadRow label="connectivity.ocpp.key.SupportedFeatureProfilesMaxLength" value={formatServiceNumber(language, serviceOcppConfig.SupportedFeatureProfilesMaxLength)} />
+                      <ServiceStatusRow label="connectivity.ocpp.key.ReserveConnectorZeroSupported" on={serviceOcppConfig.ReserveConnectorZeroSupported} />
+                      <ServiceReadRow label="connectivity.ocpp.key.ChargeProfileMaxStackLevel" value={formatServiceNumber(language, serviceOcppConfig.ChargeProfileMaxStackLevel)} />
+                      <ServiceChipsRow label="connectivity.ocpp.key.ChargingScheduleAllowedChargingRateUnit" values={serviceOcppConfig.ChargingScheduleAllowedChargingRateUnit} />
+                      <ServiceReadRow label="connectivity.ocpp.key.ChargingScheduleMaxPeriods" value={formatServiceNumber(language, serviceOcppConfig.ChargingScheduleMaxPeriods)} />
+                      <ServiceStatusRow label="connectivity.ocpp.key.ConnectorSwitch3to1PhaseSupported" on={serviceOcppConfig.ConnectorSwitch3to1PhaseSupported} />
+                      <ServiceReadRow label="connectivity.ocpp.key.MaxChargingProfilesInstalled" value={formatServiceNumber(language, serviceOcppConfig.MaxChargingProfilesInstalled)} />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceFirmware' && (
+                <FullscreenOverlay
+                  title="Firmware update"
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceSettings')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="6.1 Stav update">
+                      <ServiceReadRow label="system.fwUpdate.status" value={serviceFirmwareStatus} />
+                      <ServiceReadRow label="system.fwUpdate.fileVersion" value={SERVICE_FIRMWARE_GLOBAL_VERSION} />
+                      <ServiceProgressRow label="system.fwUpdate.moduleProgress" current={serviceFirmwareModuleProgress} max={runtimeConnectors.length} />
+                      <ServiceReadRow label="firmware.fileName" value={SERVICE_FIRMWARE_GLOBAL_FILE} targetChars={56} />
+                    </ServiceSectionCard>
+                    {runtimeConnectors.map((connector) => (
+                      <ServiceSectionCard key={`fw-${connector.id}`} title={connector.parkingSpot}>
+                        <ServiceReadRow label="connector[].evm.fw.version" value={serviceConnectorState[connector.id]?.evmFwVersion ?? 0} />
+                        <ServiceReadRow label="firmware.sendState" value={serviceFirmwareConnectorStatusText(language, connector.id)} targetChars={54} />
+                      </ServiceSectionCard>
+                    ))}
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceConnectors' && (
+                <FullscreenOverlay
+                  title="Konektory"
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceSettings')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="7.1 Zoznam konektorov">
+                      <Text style={styles.infoReaderCardText}>Vyberte konektor pre detailné servisné obrazovky.</Text>
+                    </ServiceSectionCard>
+                    {runtimeConnectors.map((connector) => (
+                      <ServiceSectionCard key={`connector-list-${connector.id}`} title={connector.parkingSpot}>
+                        <ServiceReadRow label="connector[].evseCpoId" value={connector.evseCpoId} />
+                        <ServiceReadRow label="connector[].powerType" value={connector.powerType} />
+                        <ServiceReadRow label="connector[].plugType" value={connector.plugType} />
+                        <ServiceReadRow label="connector[].maxAmps" value={formatServiceNumber(language, connector.maxAmps)} />
+                        <ServiceReadRow label="connector[].parkingSpot" value={connector.parkingSpot} />
+                        <ServiceReadRow label="connector[].evm.state" value={serviceConnectorState[connector.id]?.evmState ?? 'AVAILABLE'} />
+                        <ServiceReadRow label="connector[].meter.state" value={serviceConnectorState[connector.id]?.meterState ?? 'AVAILABLE'} />
+                        <ServiceReadRow label="connector[].ocpp.status" value={connector.ocpp.status} />
+                        <ServiceReadRow label="connector[].activeTx.id" value={connector.activeTx?.id ?? '—'} />
+                        <ServiceToggleRow
+                          label="connector[].evm.manual.enabled"
+                          on={serviceConnectorState[connector.id]?.evmManualEnabled ?? false}
+                          onToggle={() =>
+                            updateServiceConnectorState(
+                              connector.id,
+                              'evmManualEnabled',
+                              !(serviceConnectorState[connector.id]?.evmManualEnabled ?? false)
+                            )
+                          }
+                        />
+                        <ServiceStatusRow label="connector[].hasPublicPolicy" on={connector.hasPublicPolicy} />
+                        <ServiceStatusRow label="connector[].hasEroamingHubject" on={Boolean(connector.hasEroamingHubject)} />
+                        <StationRfidQuickAction
+                          icon="cog"
+                          label="Setup"
+                          onPress={() => openServiceConnectorScreen('serviceConnectorOverview', connector.id)}
+                        />
+                      </ServiceSectionCard>
+                    ))}
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceConnectorOverview' && serviceSelectedConnector && serviceSelectedConnectorData && (
+                <FullscreenOverlay
+                  title={`${serviceSelectedConnector.parkingSpot} / Prehľad`}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceConnectors')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="7.2 Konektor / Prehľad">
+                      <ServiceReadRow label="connector[].evseCpoId" value={serviceSelectedConnector.evseCpoId} />
+                      <ServiceReadRow label="connector[].powerType" value={serviceSelectedConnector.powerType} />
+                      <ServiceReadRow label="connector[].phases" value={formatServiceNumber(language, serviceSelectedConnector.phases)} />
+                      <ServiceReadRow label="connector[].maxAmps" value={formatServiceNumber(language, serviceSelectedConnector.maxAmps)} />
+                      <ServiceReadRow label="connector[].plugType" value={serviceSelectedConnector.plugType} />
+                      <ServiceReadRow label="connector[].parkingSpot" value={serviceSelectedConnector.parkingSpot} />
+                      <ServiceReadRow label="connector[].evm.state" value={serviceSelectedConnectorData.evmState} />
+                      <ServiceReadRow label="connector[].meter.state" value={serviceSelectedConnectorData.meterState} />
+                      <ServiceReadRow label="connector[].ocpp.status" value={serviceSelectedConnector.ocpp.status} />
+                      <ServiceReadRow label="connector[].activeTx.id" value={serviceSelectedConnector.activeTx?.id ?? '—'} />
+                      <ServiceToggleRow
+                        label="connector[].evm.manual.enabled"
+                        on={serviceSelectedConnectorData.evmManualEnabled}
+                        onToggle={() =>
+                          updateServiceConnectorState(
+                            serviceSelectedConnector.id,
+                            'evmManualEnabled',
+                            !serviceSelectedConnectorData.evmManualEnabled
+                          )
+                        }
+                      />
+                      <ServiceStatusRow label="connector[].hasPublicPolicy" on={serviceSelectedConnector.hasPublicPolicy} />
+                      <ServiceStatusRow label="connector[].hasEroamingHubject" on={Boolean(serviceSelectedConnector.hasEroamingHubject)} />
+                      <ServiceStatusRow label="connector[].publicPolicy.validNow" on={serviceSelectedConnectorData.publicPolicyValidNow} />
+                      <ServiceReadRow label="connector[].publicPolicy.price" value={formatServiceNumber(language, serviceSelectedConnector.publicPolicy.price, 2)} />
+                      <ServiceReadRow label="connector[].publicPolicy.validTo" value={formatServiceDateTime(language, serviceSelectedConnectorData.publicPolicyValidTo)} />
+                    </ServiceSectionCard>
+                    <StationRfidQuickAction icon="microchip" label="EVM" onPress={() => openServiceConnectorScreen('serviceConnectorEvm')} />
+                    <StationRfidQuickAction icon="tools" label="Manual" onPress={() => openServiceConnectorScreen('serviceConnectorEvmManual')} />
+                    <StationRfidQuickAction icon="chart-line" label="ELM meter" onPress={() => openServiceConnectorScreen('serviceConnectorElm')} />
+                    <StationRfidQuickAction icon="link" label="OCPP" onPress={() => openServiceConnectorScreen('serviceConnectorOcpp')} />
+                    <StationRfidQuickAction icon="globe" label="Policy" onPress={() => openServiceConnectorScreen('serviceConnectorPolicy')} />
+                    <StationRfidQuickAction icon="receipt" label="TX" onPress={() => openServiceConnectorScreen('serviceConnectorTx')} />
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceConnectorEvm' && serviceSelectedConnector && serviceSelectedConnectorData && (
+                <FullscreenOverlay
+                  title={`${serviceSelectedConnector.parkingSpot} / EVM`}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceConnectorOverview')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="7.3 Konektor / EVM">
+                      <ServiceReadRow label="connector[].evm.lastResponse" value={formatServiceDateTime(language, serviceSelectedConnectorData.evmLastResponse)} />
+                      <ServiceReadRow label="connector[].evm.budget" value={formatServiceNumber(language, serviceSelectedConnectorData.evmBudget)} />
+                      <ServiceToggleRow label="connector[].evm.rcdEnabled" on={serviceSelectedConnectorData.evmRcdEnabled} onToggle={() => updateServiceConnectorState(serviceSelectedConnector.id, 'evmRcdEnabled', !serviceSelectedConnectorData.evmRcdEnabled)} />
+                      <ServiceToggleRow label="connector[].evm.permanentLock" on={serviceSelectedConnectorData.evmPermanentLock} onToggle={() => updateServiceConnectorState(serviceSelectedConnector.id, 'evmPermanentLock', !serviceSelectedConnectorData.evmPermanentLock)} />
+                      <ServiceReadRow label="connector[].evm.fw.version" value={formatServiceNumber(language, serviceSelectedConnectorData.evmFwVersion)} />
+                      <ServiceReadRow label="connector[].evm.hwAddress" value={serviceSelectedConnectorData.evmHwAddress} />
+                      <ServiceStatusRow label="connector[].evm.cibEnabled" on={serviceSelectedConnectorData.evmCibEnabled} />
+                      <ServiceReadRow label="connector[].evm.cpV" value={formatServiceNumber(language, serviceSelectedConnectorData.evmCpV)} />
+                      <ServiceStatusRow label="connector[].evm.rcdErr" on={serviceSelectedConnectorData.evmRcdErr} />
+                      <ServiceStatusRow label="connector[].evm.do1" on={serviceSelectedConnectorData.evmDo1} />
+                      <ServiceStatusRow label="connector[].evm.do2" on={serviceSelectedConnectorData.evmDo2} />
+                      <ServiceStatusRow label="connector[].evm.lock" on={serviceSelectedConnectorData.evmLock} />
+                      <ServiceReadRow label="connector[].evm.state" value={serviceSelectedConnectorData.evmState} />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceConnectorEvmManual' && serviceSelectedConnector && serviceSelectedConnectorData && (
+                <FullscreenOverlay
+                  title={`${serviceSelectedConnector.parkingSpot} / EVM manual`}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceConnectorOverview')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="7.4 Konektor / EVM manual">
+                      <ServiceToggleRow label="connector[].evm.manual.enabled" on={serviceSelectedConnectorData.evmManualEnabled} onToggle={() => updateServiceConnectorState(serviceSelectedConnector.id, 'evmManualEnabled', !serviceSelectedConnectorData.evmManualEnabled)} />
+                      <ServiceInputRow label="connector[].evm.manual.budget" value={String(serviceSelectedConnectorData.evmManualBudget)} onChangeText={(value) => updateServiceConnectorState(serviceSelectedConnector.id, 'evmManualBudget', Number(value.replace(/[^\d]/g, '')) || 0)} keyboardType="numeric" />
+                      <ServiceToggleRow label="connector[].evm.manual.do1" on={serviceSelectedConnectorData.evmManualDo1} onToggle={() => updateServiceConnectorState(serviceSelectedConnector.id, 'evmManualDo1', !serviceSelectedConnectorData.evmManualDo1)} />
+                      <ServiceToggleRow label="connector[].evm.manual.do2" on={serviceSelectedConnectorData.evmManualDo2} onToggle={() => updateServiceConnectorState(serviceSelectedConnector.id, 'evmManualDo2', !serviceSelectedConnectorData.evmManualDo2)} />
+                      <ServiceToggleRow label="connector[].evm.manual.lock" on={serviceSelectedConnectorData.evmManualLock} onToggle={() => updateServiceConnectorState(serviceSelectedConnector.id, 'evmManualLock', !serviceSelectedConnectorData.evmManualLock)} />
+                      <ServiceToggleRow label="connector[].evm.manual.ignoreRcd" on={serviceSelectedConnectorData.evmManualIgnoreRcd} onToggle={() => updateServiceConnectorState(serviceSelectedConnector.id, 'evmManualIgnoreRcd', !serviceSelectedConnectorData.evmManualIgnoreRcd)} />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceConnectorElm' && serviceSelectedConnector && serviceSelectedConnectorData && (
+                <FullscreenOverlay
+                  title={`${serviceSelectedConnector.parkingSpot} / ELM meter`}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceConnectorOverview')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="7.5 Konektor / ELM meter">
+                      <ServiceReadRow label="connector[].meter.lastResponse" value={formatServiceDateTime(language, serviceSelectedConnectorData.meterLastResponse)} />
+                      <ServiceReadRow label="connector[].meter.energy" value={formatServiceNumber(language, serviceSelectedConnectorData.meterEnergy, 1)} />
+                      <ServiceChipsRow label="connector[].meter.energy.phase[]" values={serviceSelectedConnectorData.meterEnergyPhase.map((value, idx) => `L${idx + 1}: ${formatServiceNumber(language, value, 0)}`)} />
+                      <ServiceChipsRow label="connector[].meter.voltage.phase[]" values={serviceSelectedConnectorData.meterVoltagePhase.map((value, idx) => `L${idx + 1}: ${formatServiceNumber(language, value, 1)}`)} />
+                      <ServiceReadRow label="connector[].meter.power" value={formatServiceNumber(language, serviceSelectedConnectorData.meterPower, 1)} />
+                      <ServiceChipsRow label="connector[].meter.power.phase[]" values={serviceSelectedConnectorData.meterPowerPhase.map((value, idx) => `L${idx + 1}: ${formatServiceNumber(language, value, 1)}`)} />
+                      <ServiceChipsRow label="connector[].meter.current.phase[]" values={serviceSelectedConnectorData.meterCurrentPhase.map((value, idx) => `L${idx + 1}: ${formatServiceNumber(language, value, 1)}`)} />
+                      <ServiceReadRow label="connector[].meter.countImp" value={formatServiceNumber(language, serviceSelectedConnectorData.meterCountImp)} />
+                      <ServiceReadRow label="connector[].meter.countImpLast" value={formatServiceNumber(language, serviceSelectedConnectorData.meterCountImpLast)} />
+                      <ServiceReadRow label="connector[].meter.state" value={serviceSelectedConnectorData.meterState} />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceConnectorOcpp' && serviceSelectedConnector && serviceSelectedConnectorData && (
+                <FullscreenOverlay
+                  title={`${serviceSelectedConnector.parkingSpot} / OCPP`}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceConnectorOverview')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="7.6 Konektor / OCPP">
+                      <ServiceReadRow label="connector[].ocpp.status" value={serviceSelectedConnector.ocpp.status} />
+                      <ServiceReadRow label="connector[].ocpp.statusLastSent" value={serviceSelectedConnectorData.ocppStatusLastSent} />
+                      <ServiceReadRow label="connector[].ocpp.statusChangedAt" value={formatServiceDateTime(language, serviceSelectedConnectorData.ocppStatusChangedAt)} />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceConnectorPolicy' && serviceSelectedConnector && serviceSelectedConnectorData && (
+                <FullscreenOverlay
+                  title={`${serviceSelectedConnector.parkingSpot} / Politika a roaming`}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceConnectorOverview')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="7.7 Konektor / Politika a roaming">
+                      <ServiceChipsRow label="connector[].eroamingEmpList" values={serviceSelectedConnector.eroamingEmpList ?? []} />
+                      <ServiceReadRow label="connector[].publicPolicy.policyEndUtc" value={formatServiceDateTime(language, serviceSelectedConnectorData.publicPolicyPolicyEndUtc)} />
+                      <ServiceStatusRow label="connector[].publicPolicy.withoutTimeSchedule" on={serviceSelectedConnectorData.publicPolicyWithoutTimeSchedule} />
+                      <ServiceStatusRow label="connector[].publicPolicy.scheduleActiveNow" on={serviceSelectedConnectorData.publicPolicyScheduleActiveNow} />
+                      <ServiceChipsRow label="connector[].publicPolicy.schedule[]" values={serviceSelectedConnectorData.publicPolicySchedule} />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceConnectorTx' && serviceSelectedConnector && serviceSelectedConnectorData && (
+                <FullscreenOverlay
+                  title={`${serviceSelectedConnector.parkingSpot} / Aktívna transakcia`}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceConnectorOverview')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title="7.8 Konektor / Aktívna transakcia">
+                      <ServiceReadRow label="connector[].activeTx.id" value={serviceSelectedConnector.activeTx?.id ?? '—'} />
+                      <ServiceStatusRow label="connector[].activeTx.hasReachedCharging" on={serviceSelectedConnectorData.activeTxHasReachedCharging} />
+                      <ServiceReadRow label="connector[].activeTx.meterValueStartWh" value={formatServiceNumber(language, serviceSelectedConnectorData.activeTxMeterValueStartWh)} />
+                      <ServiceReadRow label="connector[].activeTx.meterValueEndWh" value={formatServiceNumber(language, serviceSelectedConnectorData.activeTxMeterValueEndWh)} />
+                      <ServiceReadRow label="connector[].activeTx.tagId" value={serviceSelectedConnectorData.activeTxTagId} />
+                      <ServiceReadRow label="connector[].activeTx.userId" value={serviceSelectedConnectorData.activeTxUserId} />
+                      <ServiceReadRow label="connector[].activeTx.avPolicyType" value={serviceSelectedConnectorData.activeTxAvPolicyType} />
+                      <ServiceJsonRow label="connector[].activeTx.priceMeta" value={serviceSelectedConnectorData.activeTxPriceMeta} />
+                      <ServiceReadRow label="connector[].activeTx.chargingTime" value={serviceSelectedConnectorData.activeTxChargingTime} />
+                      <ServiceReadRow label="connector[].activeTx.suspendedByUserTime" value={serviceSelectedConnectorData.activeTxSuspendedByUserTime} />
+                      <ServiceReadRow label="connector[].activeTx.vatRate" value={formatServiceNumber(language, serviceSelectedConnectorData.activeTxVatRate, 2)} />
+                      <ServiceReadRow label="connector[].activeTx.costWithVat" value={formatServiceNumber(language, serviceSelectedConnectorData.activeTxCostWithVat, 2)} />
+                      <ServiceReadRow label="connector[].activeTx.chargingStartTs" value={formatServiceDateTime(language, serviceSelectedConnectorData.activeTxChargingStartTs)} />
+                      <ServiceReadRow label="connector[].activeTx.chargingEndTs" value={formatServiceDateTime(language, serviceSelectedConnectorData.activeTxChargingEndTs)} />
+                    </ServiceSectionCard>
+                  </View>
+                </FullscreenOverlay>
+              )}
+
+              {screen === 'serviceBrowser' && (
+                <FullscreenOverlay
+                  title={t(language, 'service.browser.title')}
+                  scrollVertical={SCREEN_SCROLL_VERTICAL.serviceMenu}
+                  bubbleSnapScroll
+                  onClose={() => setScreen('serviceSettings')}
+                  useBackButton
+                  backAccessibilityLabel={overlayBackAccessibilityLabel}
+                  scrollUpAccessibilityLabel={scrollUpAccessibilityLabel}
+                  scrollDownAccessibilityLabel={scrollDownAccessibilityLabel}
+                >
+                  <View style={styles.infoReaderScrollInner}>
+                    <ServiceSectionCard title={t(language, 'service.card.browser')}>
+                      <Text style={styles.serviceFieldLabel}>{t(language, 'service.browser.url')}</Text>
+                      <TextInput
+                        value={serviceBrowserUrl}
+                        onChangeText={setServiceBrowserUrl}
+                        style={styles.serviceUrlInput}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                      />
+                      <Text style={styles.infoReaderCardText}>{t(language, 'service.browser.hint')}</Text>
+                    </ServiceSectionCard>
+                    <ServiceQuickPair
+                      left={
+                        <StationRfidQuickAction
+                          icon="qrcode"
+                          label={t(language, 'service.browser.showQr')}
+                          onPress={() =>
+                            openQr(t(language, 'service.browser.title'), serviceBrowserUrl, { returnTo: 'serviceBrowser' })
+                          }
+                        />
+                      }
+                      right={
+                        <StationRfidQuickAction
+                          icon="external-link-alt"
+                          label={t(language, 'service.browser.open')}
+                          onPress={() => {
+                            void Linking.openURL(serviceBrowserUrl).catch(() =>
+                              showKioskToastAlert(
+                                t(language, 'service.browser.title'),
+                                t(language, 'service.browser.openFailed')
+                              )
+                            );
+                          }}
+                        />
+                      }
+                    />
+                  </View>
                 </FullscreenOverlay>
               )}
 
                 </View>
-              </ContentIconScaleContext.Provider>
-            </ContentTextScaleContext.Provider>
+                </ContentIconScaleContext.Provider>
+              </ContentTextScaleContext.Provider>
+            </ServiceLanguageContext.Provider>
           </View>
         </View>
       </KioskViewport>
 
-      <Modal visible={rfidTapFeedback !== null} transparent animationType="fade">
+      <Modal visible={rfidTapModalVisible} transparent animationType="fade">
         <View style={[styles.rfidTapModalRoot, KIOSK_NO_SELECT_WEB]} pointerEvents="none">
           <View style={styles.rfidTapModalCard}>
             {rfidTapFeedback === 'ok' ? (
@@ -1190,31 +3707,6 @@ export default function App() {
         </View>
       </Modal>
     </>
-  );
-}
-
-function ServiceMenuList({ items }: { items: Array<{ id: string; title: string; onPress: () => void }> }) {
-  return (
-    <View style={styles.serviceMenuWrap}>
-      <View style={styles.serviceMenuItems}>
-        {items.map((item) => (
-          <Pressable
-            key={item.id}
-            style={({ pressed }) => [styles.serviceMenuItem, pressed && styles.infoActionPressed]}
-            onPress={item.onPress}
-          >
-            <View style={styles.serviceMenuItemMain}>
-              <FitText style={styles.serviceMenuItemText} minScale={0.5} targetChars={28}>
-                {item.title}
-              </FitText>
-            </View>
-            <View style={styles.serviceMenuItemStrip}>
-              <RNText style={styles.serviceMenuItemArrow}>›</RNText>
-            </View>
-          </Pressable>
-        ))}
-      </View>
-    </View>
   );
 }
 
@@ -1315,22 +3807,6 @@ function ServicePinContent({
         </View>
       </ContentIconScaleContext.Provider>
     </ContentTextScaleContext.Provider>
-  );
-}
-
-function ServiceFinalContent() {
-  return (
-    <View style={styles.serviceFinalWrap}>
-      <Text style={styles.serviceFinalTitle}>Mock akcie (úroveň 3)</Text>
-      <View style={styles.serviceFinalCard}>
-        <Text style={styles.serviceFinalLabel}>– Reset lokálnej cache</Text>
-        <Text style={styles.serviceFinalLabel}>– Simulácia reštartu frontend app</Text>
-        <Text style={styles.serviceFinalLabel}>– Export posledných 50 logov</Text>
-      </View>
-      <Text style={styles.serviceFinalHint}>
-        Klepnutie na logo AGEVOLT v hornom riadku vráti kiosk do bežného režimu Home.
-      </Text>
-    </View>
   );
 }
 
@@ -1476,6 +3952,7 @@ function StationSection({
   children,
   showStationBack,
   onStationHomePress,
+  onStationDeviceIdPress,
   compact,
 }: {
   lang: LanguageCode;
@@ -1485,6 +3962,8 @@ function StationSection({
   children: ReactNode;
   showStationBack?: boolean;
   onStationHomePress?: () => void;
+  /** Mock: prepínač 1× / 2× konektor v UI (tap na Device ID) — len na prehľade stanice, nie v detaile konektora. */
+  onStationDeviceIdPress?: () => void;
   compact?: boolean;
 }) {
   const locationLabel = lang === 'DEV' ? '{station.location.name}' : stationLocationName;
@@ -1500,12 +3979,7 @@ function StationSection({
           <RNText style={styles.stationBackArrow}>‹</RNText>
         </View>
       ) : null}
-      <View
-        style={[
-          styles.stationHeaderLeft,
-          showStationBack && styles.stationHeaderLeftWithBack,
-        ]}
-      >
+      <View style={[styles.stationHeaderLeft, showStationBack && styles.stationHeaderLeftWithBack]}>
         <View style={styles.stationHeaderNameRow}>
           <ContentIconScaleContext.Provider value={1}>
             <AppIcon name="location-dot" size={39} />
@@ -1537,15 +4011,34 @@ function StationSection({
       </View>
       <View style={styles.stationHeaderDivider} />
       <View style={styles.stationHeaderRight}>
-        <ZoomAdaptiveText
-          style={styles.stationHeaderIdText}
-          zoomMaxLines={deviceIdMaxLines}
-          zoomTargetCharsPerLine={8}
-          zoomMinScale={0.26}
-          fitSingleLine={deviceIdMaxLines === 1}
-        >
-          {deviceIdShort}
-        </ZoomAdaptiveText>
+        {onStationDeviceIdPress ? (
+          <Pressable
+            onPress={onStationDeviceIdPress}
+            accessibilityRole="button"
+            accessibilityLabel="Toggle single / dual connector UI (mock)"
+            style={styles.stationHeaderDeviceIdPress}
+          >
+            <ZoomAdaptiveText
+              style={styles.stationHeaderIdText}
+              zoomMaxLines={deviceIdMaxLines}
+              zoomTargetCharsPerLine={8}
+              zoomMinScale={0.26}
+              fitSingleLine={deviceIdMaxLines === 1}
+            >
+              {deviceIdShort}
+            </ZoomAdaptiveText>
+          </Pressable>
+        ) : (
+          <ZoomAdaptiveText
+            style={styles.stationHeaderIdText}
+            zoomMaxLines={deviceIdMaxLines}
+            zoomTargetCharsPerLine={8}
+            zoomMinScale={0.26}
+            fitSingleLine={deviceIdMaxLines === 1}
+          >
+            {deviceIdShort}
+          </ZoomAdaptiveText>
+        )}
       </View>
     </>
   );
@@ -1739,185 +4232,490 @@ function formatQrHeaderEvseId(rawTitle: string): string {
 
 type AccessMode = 'free' | 'private' | 'public';
 
+/** Rozdelenie e-mailu pred / za @ pre dva riadky (iba ak sú obe časti neprázdne). */
+function splitEmailAtSign(email: string): { local: string; domain: string } | null {
+  const s = email.trim();
+  const i = s.indexOf('@');
+  if (i <= 0 || i >= s.length - 1) return null;
+  const local = s.slice(0, i).trim();
+  const domain = s.slice(i + 1).trim();
+  if (!local || !domain) return null;
+  return { local, domain };
+}
+
 function getAccessModeFromConnector(connector: TpConnector): AccessMode {
   if (connector.access.unauthorizedFreeCharging) return 'free';
   if (connector.access.publicCharging) return 'public';
   return 'private';
 }
 
-/** Demo preview: icon cycles 6 UI variants (paid / eRoaming / private / free). */
-const ACCESS_PREVIEW_COUNT = 6;
-const PREVIEW_ER_EMP_THREE = ['Plugsurfing', 'Shell Recharge', 'EnBW mobility+'] as const;
-const PREVIEW_ER_EMP_FIVE = [
-  'Plugsurfing',
-  'Shell Recharge',
-  'EnBW mobility+',
-  'Ionity',
-  'Fastned',
-] as const;
-const PAID_HEADER_ICON = 'globe-americas' as const;
-const EROAMING_BUBBLE_ICON = 'exchange-alt' as const;
-
-function ConnectorAccessBubble({
-  connector,
-  currency,
-  lang,
-  ownerName,
-  onOpenInfoPricing,
-  onOpenInfoEroaming,
-  onOpenInfoFree,
-  initialPreviewIndex,
-}: {
-  connector: TpConnector;
-  currency: string;
-  lang: LanguageCode;
-  ownerName: string;
-  onOpenInfoPricing: () => void;
-  onOpenInfoEroaming: () => void;
-  onOpenInfoFree: () => void;
-  /** When set (e.g. EVconnected demo), start at this preview index. */
-  initialPreviewIndex?: number;
-}) {
-  const [previewIndex, setPreviewIndex] = useState(() => initialPreviewIndex ?? 0);
-
-  useEffect(() => {
-    setPreviewIndex(initialPreviewIndex ?? 0);
-  }, [connector.id, initialPreviewIndex]);
-
-  const cyclePreview = () => {
-    setPreviewIndex((i) => (i + 1) % ACCESS_PREVIEW_COUNT);
-  };
-
-  const renderEroamingBubble = (emps: readonly string[]) => {
-    const extraCount = Math.max(0, emps.length - 3);
-    return (
-      <Pressable
-        style={({ pressed }) => [
-          styles.connectorBubble,
-          styles.connectorAccessBubble,
-          styles.connectorBubbleClickable,
-          pressed && styles.connectorBubblePressed,
-        ]}
-        onPress={onOpenInfoEroaming}
-      >
-        <View style={styles.connectorIdleRfidInfoIcon}>
-          <AppIcon name="info-circle" size={52} />
-        </View>
-        <View style={styles.connectorAccessHeaderRow}>
-          <AppIcon name={EROAMING_BUBBLE_ICON} size={52} />
-          <RNText style={styles.connectorAccessTitle}>eRoaming</RNText>
-        </View>
-        <View style={styles.connectorAccessEroamingEmpCol}>
-          <RNText style={styles.connectorAccessEroamingLine}>{emps.slice(0, 3).join(', ')}</RNText>
-          {extraCount > 0 ? (
-            <RNText style={styles.connectorAccessEroamingLine}>
-              {`+ ${extraCount} ${t(lang, 'access.eroaming.more')}`}
-            </RNText>
-          ) : null}
-        </View>
-      </Pressable>
-    );
-  };
-
-  const renderPaidBlock = (opts: {
-    showExtraFeesLine: boolean;
-    eroaming: null | { emps: readonly string[] };
-  }) => (
-    <>
-      <Pressable
-        style={({ pressed }) => [
-          styles.connectorBubble,
-          styles.connectorAccessBubble,
-          styles.connectorBubbleClickable,
-          pressed && styles.connectorBubblePressed,
-        ]}
-        onPress={onOpenInfoPricing}
-      >
-        <View style={styles.connectorIdleRfidInfoIcon}>
-          <AppIcon name="info-circle" size={52} />
-        </View>
-        <View style={styles.connectorAccessHeaderRow}>
-          <Pressable onPress={cyclePreview} hitSlop={12}>
-            <ContentIconScaleContext.Provider value={1}>
-              <AppIcon name={PAID_HEADER_ICON} size={52} />
-            </ContentIconScaleContext.Provider>
-          </Pressable>
-          <RNText style={styles.connectorAccessTitle}>{t(lang, 'access.mode.paid')}</RNText>
-        </View>
-        <RNText style={styles.connectorAccessPriceHero}>
-          {`${connector.publicPolicy.price.toFixed(2)} ${currency}/kWh`}
-        </RNText>
-        {opts.showExtraFeesLine ? (
-          <RNText style={styles.connectorAccessNote}>
-            {`+ ${t(lang, 'connector.detail.extraFees')}`}
-          </RNText>
-        ) : null}
-      </Pressable>
-      {opts.eroaming ? renderEroamingBubble(opts.eroaming.emps) : null}
-    </>
-  );
-
-  const renderPrivateBlock = () => (
-    <View style={[styles.connectorBubble, styles.connectorAccessBubble]}>
-      <View style={styles.connectorAccessHeaderRow}>
-        <Pressable onPress={cyclePreview} hitSlop={12}>
-          <AppIcon name="lock" size={52} />
-        </Pressable>
-        <RNText style={styles.connectorAccessTitle}>{t(lang, 'access.mode.private')}</RNText>
-      </View>
-      <RNText style={styles.connectorAccessNote}>
-        {t(lang, 'access.private.hint').replace('{owner}', ownerName)}
-      </RNText>
-    </View>
-  );
-
-  const renderFreeBlock = () => (
+/** Riadok vo full-screen výbere vozidla: SPZ a názov oddelene (bez „|“), prázdne riadky sa nevykreslia. */
+function StationRfidPickerVehicleRow({ vehicle, onPress }: { vehicle: MockVehicle; onPress: () => void }) {
+  const plate = (vehicle.plate ?? '').trim();
+  const name = (vehicle.name ?? '').trim();
+  return (
     <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
       style={({ pressed }) => [
-        styles.connectorBubble,
-        styles.connectorAccessBubble,
-        styles.connectorBubbleClickable,
+        styles.stationRfidPickerVehicleRowButton,
         pressed && styles.connectorBubblePressed,
       ]}
-      onPress={onOpenInfoFree}
     >
-      <View style={styles.connectorIdleRfidInfoIcon}>
-        <AppIcon name="info-circle" size={52} />
+      <View style={styles.stationRfidPickerVehicleRowMain}>
+        <AppIcon name="car" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+        <View style={styles.stationRfidPickerVehicleLines}>
+          {plate.length > 0 ? (
+            <FitText
+              style={styles.stationRfidPickerVehiclePlateLine}
+              numberOfLines={1}
+              targetChars={14}
+              minScale={0.36}
+            >
+              {plate}
+            </FitText>
+          ) : null}
+          {name.length > 0 ? (
+            <FitText
+              style={styles.stationRfidPickerVehicleNameLine}
+              numberOfLines={2}
+              targetChars={28}
+              minScale={0.34}
+            >
+              {name}
+            </FitText>
+          ) : null}
+        </View>
       </View>
-      <View style={styles.connectorAccessHeaderRow}>
-        <Pressable onPress={cyclePreview} hitSlop={12}>
-          <AppIcon name="unlock" size={52} />
-        </Pressable>
-        <RNText style={styles.connectorAccessTitle}>{t(lang, 'access.mode.free')}</RNText>
+      <View style={[styles.stationRfidActionButtonStrip, styles.stationRfidActionButtonStripRight]}>
+        <RNText style={styles.stationRfidActionButtonArrow}>›</RNText>
       </View>
-      <RNText style={styles.connectorAccessNote}>{t(lang, 'access.free.hint')}</RNText>
     </Pressable>
   );
+}
 
-  switch (previewIndex) {
-    case 0:
-      return renderPaidBlock({ showExtraFeesLine: false, eroaming: null });
-    case 1:
-      return renderPaidBlock({
-        showExtraFeesLine: false,
-        eroaming: { emps: PREVIEW_ER_EMP_THREE },
-      });
-    case 2:
-      return renderPaidBlock({
-        showExtraFeesLine: false,
-        eroaming: { emps: PREVIEW_ER_EMP_FIVE },
-      });
-    case 3:
-      return renderPaidBlock({
-        showExtraFeesLine: true,
-        eroaming: { emps: PREVIEW_ER_EMP_FIVE },
-      });
-    case 4:
-      return renderPrivateBlock();
-    case 5:
-    default:
-      return renderFreeBlock();
-  }
+function StationRfidQuickAction({
+  label,
+  icon,
+  onPress,
+  secondary = false,
+  omitIcon = false,
+  stripPosition = 'right',
+  disabled = false,
+  style,
+}: {
+  label: string;
+  icon?: React.ComponentProps<typeof FontAwesome5>['name'] | 'do-not-enter';
+  onPress: () => void;
+  secondary?: boolean;
+  /** Len text + šípka (napr. „Pridať do konta“ bez ikony karty). */
+  omitIcon?: boolean;
+  /** Čierny pruh: vpravo (štandard) alebo vľavo (napr. Späť v prihlasovacom kroku). */
+  stripPosition?: 'left' | 'right';
+  disabled?: boolean;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const contentTextScale = useContext(ContentTextScaleContext);
+  const isZoomed = contentTextScale > 1;
+  /** Pri lupe musí bublina narásť — pevná maxHeight 96 px text orezávala. */
+  const bubbleMinHeight = Math.round(CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT * (isZoomed ? contentTextScale : 1));
+  const stripW = Math.round(34 * (isZoomed ? contentTextScale : 1));
+  const mainPadEnd = Math.round(44 * (isZoomed ? contentTextScale : 1));
+  const iconSize = Math.round(CONNECTOR_IDLE_ROW_ICON_SIZE * (isZoomed ? contentTextScale : 1));
+  const stripOnLeft = stripPosition === 'left';
+  const stripStyle = isZoomed ? { width: stripW, minWidth: stripW, maxWidth: stripW } : null;
+  const mainStripStyle = stripOnLeft
+    ? { paddingLeft: mainPadEnd, paddingRight: 12 }
+    : { paddingLeft: 12, paddingRight: mainPadEnd };
+  return (
+    <Pressable
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.stationRfidActionButton,
+        !isZoomed && styles.stationRfidActionButtonHeightLock,
+        isZoomed && { minHeight: bubbleMinHeight },
+        secondary && styles.stationRfidActionButtonSecondary,
+        !disabled && pressed && styles.connectorBubblePressed,
+        disabled && { opacity: 0.45 },
+        style,
+      ]}
+    >
+      {stripOnLeft ? (
+        <View style={[styles.stationRfidActionButtonStrip, styles.stationRfidActionButtonStripLeft, stripStyle]}>
+          <RNText style={styles.stationRfidActionButtonArrow}>‹</RNText>
+        </View>
+      ) : null}
+      <View
+        style={[
+          styles.stationRfidActionButtonMain,
+          stripOnLeft ? styles.stationRfidActionButtonMainStripLeft : styles.stationRfidActionButtonMainStripRight,
+          isZoomed && mainStripStyle,
+          isZoomed && { minHeight: bubbleMinHeight },
+        ]}
+      >
+        {!omitIcon && icon ? <AppIcon name={icon} size={iconSize} /> : null}
+        <FitText
+          style={styles.stationRfidModalActionLabelText}
+          numberOfLines={2}
+          targetChars={omitIcon ? 22 : 16}
+          minScale={0.38}
+        >
+          {label}
+        </FitText>
+      </View>
+      {!stripOnLeft ? (
+        <View style={[styles.stationRfidActionButtonStrip, styles.stationRfidActionButtonStripRight, stripStyle]}>
+          <RNText style={styles.stationRfidActionButtonArrow}>›</RNText>
+        </View>
+      ) : null}
+    </Pressable>
+  );
+}
+
+function ServiceSectionCard({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <View style={styles.infoReaderCard}>
+      <RNText style={styles.infoReaderCardTitle}>{title}</RNText>
+      <View style={styles.serviceSectionCardBody}>{children}</View>
+    </View>
+  );
+}
+
+function ServiceQuickPair({ left, right }: { left: ReactNode; right: ReactNode }) {
+  return (
+    <View style={styles.serviceQuickPairRow}>
+      <View style={styles.serviceQuickPairCell}>{left}</View>
+      <View style={styles.serviceQuickPairCell}>{right}</View>
+    </View>
+  );
+}
+
+function ServiceToggleChip({
+  on,
+  onToggle,
+  disabled = false,
+}: {
+  on: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
+  const scale = useContext(ContentTextScaleContext);
+  return (
+    <Pressable
+      disabled={disabled}
+      onPress={onToggle}
+      style={({ pressed }) => [
+        styles.serviceToggleChipBase,
+        scale > 1 && styles.serviceToggleChipBaseZoom,
+        on ? styles.serviceToggleChipOn : styles.serviceToggleChipOff,
+        pressed && !disabled && styles.infoActionPressed,
+      ]}
+    >
+      <RNText style={on ? styles.serviceToggleChipTextOn : styles.serviceToggleChipTextOff}>{on ? 'ON' : 'OFF'}</RNText>
+    </Pressable>
+  );
+}
+
+function ServiceFieldLabel({ label }: { label: string }) {
+  const lang = useContext(ServiceLanguageContext);
+  return (
+    <FitText style={styles.serviceFieldKeyLabel} minScale={0.66} targetChars={18}>
+      {serviceFieldLabelText(lang, label)}
+    </FitText>
+  );
+}
+
+function ServiceReadRow({
+  label,
+  value,
+  targetChars = 42,
+}: {
+  label: string;
+  value: string | number | null | undefined;
+  targetChars?: number;
+}) {
+  const lang = useContext(ServiceLanguageContext);
+  const text = value == null || value === '' ? '—' : String(value);
+  return (
+    <View style={styles.serviceFieldRow}>
+      <ServiceFieldLabel label={label} />
+      <View style={styles.serviceFieldValueWrap}>
+        <FitText style={styles.serviceFieldValue} minScale={0.62} targetChars={targetChars}>
+          {serviceHumanValue(lang, label, text)}
+        </FitText>
+      </View>
+    </View>
+  );
+}
+
+function ServiceStatusRow({ label, on }: { label: string; on: boolean }) {
+  const lang = useContext(ServiceLanguageContext);
+  return (
+    <View style={styles.serviceFieldRowBetween}>
+      <Text style={styles.serviceFieldLabelFlex}>{serviceFieldLabelText(lang, label)}</Text>
+      <ServiceToggleChip on={on} onToggle={() => undefined} disabled />
+    </View>
+  );
+}
+
+function ServiceToggleRow({
+  label,
+  on,
+  onToggle,
+}: {
+  label: string;
+  on: boolean;
+  onToggle: () => void;
+}) {
+  const lang = useContext(ServiceLanguageContext);
+  return (
+    <View style={styles.serviceFieldRowBetween}>
+      <Text style={styles.serviceFieldLabelFlex}>{serviceFieldLabelText(lang, label)}</Text>
+      <ServiceToggleChip on={on} onToggle={onToggle} />
+    </View>
+  );
+}
+
+function ServiceInputRow({
+  label,
+  value,
+  onChangeText,
+  keyboardType = 'default',
+  masked = false,
+  multiline = false,
+}: {
+  label: string;
+  value: string;
+  onChangeText: (value: string) => void;
+  keyboardType?: React.ComponentProps<typeof TextInput>['keyboardType'];
+  masked?: boolean;
+  multiline?: boolean;
+}) {
+  const scale = useContext(ContentTextScaleContext);
+  return (
+    <View style={styles.serviceFieldStack}>
+      <ServiceFieldLabel label={label} />
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        style={[
+          styles.serviceFieldInput,
+          multiline && styles.serviceFieldInputMultiline,
+          scale > 1 && styles.serviceFieldInputZoom,
+        ]}
+        autoCapitalize="none"
+        autoCorrect={false}
+        secureTextEntry={masked}
+        keyboardType={keyboardType}
+        multiline={multiline}
+      />
+    </View>
+  );
+}
+
+function ServiceSelectRow({
+  label,
+  value,
+  onPress,
+}: {
+  label: string;
+  value: string;
+  onPress: () => void;
+}) {
+  const lang = useContext(ServiceLanguageContext);
+  return (
+    <View style={styles.serviceFieldRowBetween}>
+      <Text style={styles.serviceFieldLabelFlex}>{serviceFieldLabelText(lang, label)}</Text>
+      <Pressable onPress={onPress} style={({ pressed }) => [styles.serviceValueChip, pressed && styles.infoActionPressed]}>
+        <FitText style={styles.serviceValueChipText} minScale={0.42} targetChars={12}>
+          {serviceHumanValue(lang, label, value)}
+        </FitText>
+      </Pressable>
+    </View>
+  );
+}
+
+function ServiceChipsRow({
+  label,
+  values,
+  options,
+  editable = false,
+  onToggle,
+}: {
+  label: string;
+  values: string[];
+  options?: readonly string[];
+  editable?: boolean;
+  onToggle?: (value: string) => void;
+}) {
+  const lang = useContext(ServiceLanguageContext);
+  const shownValues = editable ? options ?? [] : values;
+  return (
+    <View style={styles.serviceFieldStack}>
+      <ServiceFieldLabel label={label} />
+      <View style={styles.serviceChipWrap}>
+        {shownValues.map((item) => {
+          const active = values.includes(item);
+          if (editable && onToggle) {
+            return (
+              <Pressable
+                key={`${label}-${item}`}
+                onPress={() => onToggle(item)}
+                style={({ pressed }) => [
+                  styles.servicePill,
+                  active ? styles.servicePillActive : styles.servicePillInactive,
+                  pressed && styles.infoActionPressed,
+                ]}
+              >
+                <Text style={active ? styles.servicePillTextActive : styles.servicePillTextInactive}>
+                  {serviceHumanValue(lang, label, item)}
+                </Text>
+              </Pressable>
+            );
+          }
+          return (
+            <View key={`${label}-${item}`} style={[styles.servicePill, styles.servicePillActive]}>
+              <Text style={styles.servicePillTextActive}>{serviceHumanValue(lang, label, item)}</Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function ServiceJsonRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: Record<string, unknown>;
+}) {
+  const lang = useContext(ServiceLanguageContext);
+  return (
+    <View style={styles.serviceFieldStack}>
+      <ServiceFieldLabel label={label} />
+      <View style={styles.serviceJsonBox}>
+        <Text style={styles.serviceJsonText}>{lang === 'DEV' ? JSON.stringify(value, null, 2) : JSON.stringify(value, null, 2)}</Text>
+      </View>
+    </View>
+  );
+}
+
+function ServiceProgressRow({
+  label,
+  current,
+  max,
+}: {
+  label: string;
+  current: number;
+  max: number;
+}) {
+  const ratio = max > 0 ? Math.max(0, Math.min(1, current / max)) : 0;
+  return (
+    <View style={styles.serviceFieldStack}>
+      <ServiceReadRow label={label} value={`${current} / ${max}`} />
+      <View style={styles.serviceProgressTrack}>
+        <View style={[styles.serviceProgressFill, { width: `${ratio * 100}%` }]} />
+      </View>
+    </View>
+  );
+}
+
+function StationRfidConnectorPanel({
+  lang,
+  decision,
+  cardBlocked = false,
+  reserveCostRowSlot = false,
+  onStart,
+  onStop,
+  onMoreInfo,
+}: {
+  lang: LanguageCode;
+  decision: StationConnectorDecision;
+  /** Blokovaná karta: v bubline len Detail, bez ikony zákazu (tá je v hornom banneri). */
+  cardBlocked?: boolean;
+  /** Prázdny riadok rovnakej výšky ako suma — keď v druhom paneli suma je (zarovnanie tlačidiel). */
+  reserveCostRowSlot?: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onMoreInfo: () => void;
+}) {
+  const showPrimaryBlocked =
+    !decision.canStop && !decision.canStart && !decision.canStartRoaming;
+  const denyReason = decision.denyReasonKey ? t(lang, decision.denyReasonKey) : '';
+  /** Pri aktívnej TX na konektore (cudzia / neautorizovaná) len Detail, bez ikony zákazu. */
+  const showBlockedIconRow = showPrimaryBlocked && !cardBlocked && !decision.txActive && !decision.denyReasonKey;
+  /** Stop / Start / blokácia pod Detailom — Detail má tenší okraj len ak niečo nasleduje. */
+  const hasExtraActionsBelowDetail =
+    decision.canStop || decision.canStart || decision.canStartRoaming || showBlockedIconRow || Boolean(denyReason);
+  const startLabel = decision.canStart
+    ? t(lang, 'rfid.station.action.start')
+    : decision.canStartRoaming
+      ? t(lang, 'rfid.station.action.startRoaming')
+      : '';
+  const startIcon = decision.canStartRoaming ? 'exchange-alt' : 'bolt';
+
+  return (
+    <View style={styles.stationRfidConnectorPanel}>
+      <FitText style={styles.stationRfidConnectorSpot} numberOfLines={1} targetChars={6} minScale={0.52}>
+        {decision.parkingSpot}
+      </FitText>
+      {decision.txTotalCostLabel ? (
+        <View style={styles.connectorPreparingDetailMetricRowLeft}>
+          <View style={styles.connectorVehicleSessionIconColumn}>
+            <AppIcon name="coins" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+          </View>
+          <View style={styles.connectorChargingTimeValueCol}>
+            <FitText
+              style={styles.stationRfidConnectorCostLine}
+              numberOfLines={1}
+              targetChars={14}
+              minScale={0.42}
+            >
+              {decision.txTotalCostLabel}
+            </FitText>
+          </View>
+        </View>
+      ) : reserveCostRowSlot ? (
+        <View
+          style={[styles.connectorPreparingDetailMetricRowLeft, styles.stationRfidConnectorCostRowPlaceholder]}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        />
+      ) : null}
+      {denyReason ? (
+        <View style={styles.stationRfidConnectorReasonBox}>
+          <FitText style={styles.stationRfidConnectorReasonText} numberOfLines={3} targetChars={42} minScale={0.28}>
+            {denyReason}
+          </FitText>
+        </View>
+      ) : null}
+
+      <View style={styles.stationRfidConnectorActions}>
+        {decision.canMoreInfo ? (
+          <StationRfidQuickAction
+            label={t(lang, 'rfid.station.action.moreInfo')}
+            icon="info-circle"
+            onPress={onMoreInfo}
+            secondary={hasExtraActionsBelowDetail}
+          />
+        ) : null}
+        {decision.canStop ? (
+          <StationRfidQuickAction label={t(lang, 'rfid.station.action.stop')} icon="stop-circle" onPress={onStop} />
+        ) : null}
+        {!decision.canStop && (decision.canStart || decision.canStartRoaming) ? (
+          <StationRfidQuickAction label={startLabel} icon={startIcon} onPress={onStart} />
+        ) : null}
+        {showBlockedIconRow ? (
+          <View style={styles.stationRfidConnectorBlockedRow}>
+            <AppIcon name="do-not-enter" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
 }
 
 function sessionIsPaid(connector: TpConnector): boolean {
@@ -1927,6 +4725,328 @@ function sessionIsPaid(connector: TpConnector): boolean {
       connector.publicPolicy.sessionFee > 0 ||
       connector.publicPolicy.parkingPerHour > 0 ||
       connector.publicPolicy.occupyPerHour > 0)
+  );
+}
+
+/** Voľný / EVconnected: riadok „+ Ďalšie poplatky“ len ak sú v politike nejaké položky okrem kWh. */
+function idleConnectorShowsAdditionalFeesLine(connector: TpConnector): boolean {
+  if (!connector.hasPublicPolicy || !sessionIsPaid(connector)) return false;
+  const p = connector.publicPolicy;
+  return p.sessionFee > 0 || p.parkingPerHour > 0 || p.occupyPerHour > 0;
+}
+
+const PAID_HEADER_ICON = 'globe-americas' as const;
+const EROAMING_BUBBLE_ICON = 'exchange-alt' as const;
+
+function ConnectorPolicyExtraFeesModal({
+  visible,
+  onClose,
+  lang,
+  currency,
+  connector,
+  vatRate,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  lang: LanguageCode;
+  currency: string;
+  connector: TpConnector;
+  vatRate: number;
+}) {
+  const { height: windowHeight } = useWindowDimensions();
+  const p = connector.publicPolicy;
+  const gross = (n: number) => n * (1 + vatRate);
+  const fmt = (n: number) => `${gross(n).toFixed(2)} ${currency}`;
+  const rows: { label: string; value: string }[] = [];
+  if (p.sessionFee > 0) {
+    rows.push({ label: t(lang, 'connector.detail.feeLineSession'), value: fmt(p.sessionFee) });
+  }
+  if (p.parkingPerHour > 0) {
+    rows.push({ label: t(lang, 'connector.detail.feeLineParking'), value: `${fmt(p.parkingPerHour)}/h` });
+  }
+  if (p.occupyPerHour > 0) {
+    rows.push({ label: t(lang, 'connector.detail.feeLineOccupy'), value: `${fmt(p.occupyPerHour)}/h` });
+  }
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <View
+        style={[
+          styles.overlayWrap,
+          styles.transactionPinModalOuter,
+          KIOSK_NO_SELECT_WEB,
+          {
+            width: '100%',
+            minHeight: windowHeight,
+            ...(Platform.OS === 'web' ? { height: windowHeight } : null),
+          },
+        ]}
+      >
+        <View style={styles.transactionPinModalColumn}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.overlayHeader,
+              styles.overlayHeaderIntegratedBack,
+              pressed && styles.stationHeaderPressed,
+            ]}
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel={t(lang, 'info.reader.back')}
+          >
+            <View style={[styles.stationBackStrip, { pointerEvents: 'none' }]}>
+              <RNText style={styles.stationBackArrow}>‹</RNText>
+            </View>
+            <View style={[styles.overlayTitleRow, styles.overlayTitleRowIntegratedBack]}>
+              <View style={styles.overlayTitleTextShrinkStandalone}>
+                <FitText style={styles.overlayTitle} numberOfLines={2} targetChars={28} minScale={0.22}>
+                  {t(lang, 'connector.detail.extraFeesModalTitle')}
+                </FitText>
+              </View>
+            </View>
+          </Pressable>
+          <ScrollView
+            style={[styles.overlayCard, styles.connectorPolicyFeeModalScroll]}
+            contentContainerStyle={styles.connectorPolicyFeeModalScrollContent}
+            showsVerticalScrollIndicator
+            bounces={false}
+          >
+            {rows.map((row) => (
+              <View key={row.label} style={styles.connectorPolicyFeeModalRow}>
+                <FitText style={styles.connectorPolicyFeeModalLabel} numberOfLines={3} targetChars={36} minScale={0.22}>
+                  {row.label}
+                </FitText>
+                <RNText style={styles.connectorPolicyFeeModalValue}>{row.value}</RNText>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ConnectorEroamingListModal({
+  visible,
+  onClose,
+  lang,
+  operators,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  lang: LanguageCode;
+  operators: readonly string[];
+}) {
+  const { height: windowHeight } = useWindowDimensions();
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <View
+        style={[
+          styles.overlayWrap,
+          styles.transactionPinModalOuter,
+          KIOSK_NO_SELECT_WEB,
+          {
+            width: '100%',
+            minHeight: windowHeight,
+            ...(Platform.OS === 'web' ? { height: windowHeight } : null),
+          },
+        ]}
+      >
+        <View style={styles.transactionPinModalColumn}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.overlayHeader,
+              styles.overlayHeaderIntegratedBack,
+              pressed && styles.stationHeaderPressed,
+            ]}
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel={t(lang, 'info.reader.back')}
+          >
+            <View style={[styles.stationBackStrip, { pointerEvents: 'none' }]}>
+              <RNText style={styles.stationBackArrow}>‹</RNText>
+            </View>
+            <View style={[styles.overlayTitleRow, styles.overlayTitleRowIntegratedBack]}>
+              <View style={styles.overlayTitleTextShrinkStandalone}>
+                <FitText style={styles.overlayTitle} numberOfLines={2} targetChars={26} minScale={0.22}>
+                  {t(lang, 'connector.detail.eroamingListModalTitle')}
+                </FitText>
+              </View>
+            </View>
+          </Pressable>
+          <ScrollView
+            style={[styles.overlayCard, styles.connectorPolicyFeeModalScroll]}
+            contentContainerStyle={styles.connectorPolicyFeeModalScrollContent}
+            showsVerticalScrollIndicator
+            bounces={false}
+          >
+            {operators.map((op) => (
+              <View key={op} style={styles.connectorEroamingListLine}>
+                <RNText style={styles.connectorEroamingListBullet}>•</RNText>
+                <FitText style={styles.connectorEroamingListItem} numberOfLines={3} targetChars={40} minScale={0.22}>
+                  {op}
+                </FitText>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ConnectorAccessBubble({
+  connector,
+  currency,
+  lang,
+  ownerName,
+  onOpenInfoPricing,
+  onOpenInfoEroaming,
+  onOpenInfoFree,
+}: {
+  connector: TpConnector;
+  currency: string;
+  lang: LanguageCode;
+  ownerName: string;
+  onOpenInfoPricing: () => void;
+  onOpenInfoEroaming: () => void;
+  onOpenInfoFree: () => void;
+}) {
+  const vatRate = mockConfig.station.vatRate ?? 0;
+  const [extraFeesModalOpen, setExtraFeesModalOpen] = useState(false);
+  const [eroamingListModalOpen, setEroamingListModalOpen] = useState(false);
+
+  const accessMode = getAccessModeFromConnector(connector);
+  const showPaid =
+    accessMode === 'public' && connector.hasPublicPolicy && sessionIsPaid(connector);
+  const emps = connector.eroamingEmpList ?? [];
+  const showEroaming = Boolean(connector.hasEroamingHubject && emps.length > 0);
+  const showPrivateOnly = accessMode === 'private';
+  const showFree = accessMode === 'free';
+
+  const extraFeesLine = idleConnectorShowsAdditionalFeesLine(connector);
+  const extraCount = Math.max(0, emps.length - 3);
+
+  const paidBubble = showPaid ? (
+    <View style={[styles.connectorBubble, styles.connectorAccessBubble, styles.connectorAccessBubbleInfoInset]}>
+      <Pressable
+        onPress={onOpenInfoPricing}
+        style={({ pressed }) => [styles.connectorIdleRfidInfoIcon, pressed && styles.connectorBubblePressed]}
+        hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel={t(lang, 'info.reader.title')}
+      >
+        <AppIcon name="info-circle" size={52} />
+      </Pressable>
+      <View style={styles.connectorAccessHeaderRow}>
+        <ContentIconScaleContext.Provider value={1}>
+          <AppIcon name={PAID_HEADER_ICON} size={52} />
+        </ContentIconScaleContext.Provider>
+        <RNText style={styles.connectorAccessTitle}>{t(lang, 'access.mode.paid')}</RNText>
+      </View>
+      <RNText style={styles.connectorAccessPriceHero}>
+        {`${connector.publicPolicy.price.toFixed(2)} ${currency}/kWh`}
+      </RNText>
+      {extraFeesLine ? (
+        <Pressable
+          onPress={() => setExtraFeesModalOpen(true)}
+          style={({ pressed }) => [styles.connectorAccessLinkPressable, pressed && styles.connectorBubblePressed]}
+          accessibilityRole="button"
+          accessibilityLabel={t(lang, 'connector.detail.extraFees')}
+        >
+          <RNText style={[styles.connectorAccessNote, styles.connectorAccessLinkText]}>
+            {`+ ${t(lang, 'connector.detail.extraFees')}`}
+          </RNText>
+        </Pressable>
+      ) : null}
+    </View>
+  ) : null;
+
+  const eroamingBubble = showEroaming ? (
+    <View style={[styles.connectorBubble, styles.connectorAccessBubble, styles.connectorAccessBubbleInfoInset]}>
+      <Pressable
+        onPress={onOpenInfoEroaming}
+        style={({ pressed }) => [styles.connectorIdleRfidInfoIcon, pressed && styles.connectorBubblePressed]}
+        hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel={t(lang, 'info.reader.title')}
+      >
+        <AppIcon name="info-circle" size={52} />
+      </Pressable>
+      <View style={styles.connectorAccessHeaderRow}>
+        <AppIcon name={EROAMING_BUBBLE_ICON} size={52} />
+        <RNText style={styles.connectorAccessTitle}>{t(lang, 'connector.session.value.eroaming')}</RNText>
+      </View>
+      <View style={styles.connectorAccessEroamingEmpCol}>
+        <RNText style={styles.connectorAccessEroamingLine}>{emps.slice(0, 3).join(', ')}</RNText>
+        {extraCount > 0 ? (
+          <Pressable
+            onPress={() => setEroamingListModalOpen(true)}
+            style={({ pressed }) => [styles.connectorAccessLinkPressable, pressed && styles.connectorBubblePressed]}
+            accessibilityRole="button"
+            accessibilityLabel={`${extraCount} ${t(lang, 'access.eroaming.more')}`}
+          >
+            <RNText style={[styles.connectorAccessEroamingLine, styles.connectorAccessLinkText]}>
+              {`+ ${extraCount} ${t(lang, 'access.eroaming.more')}`}
+            </RNText>
+          </Pressable>
+        ) : null}
+      </View>
+    </View>
+  ) : null;
+
+  const privateBubble = showPrivateOnly ? (
+    <View style={[styles.connectorBubble, styles.connectorAccessBubble]}>
+      <View style={styles.connectorAccessHeaderRow}>
+        <AppIcon name="lock" size={52} />
+        <RNText style={styles.connectorAccessTitle}>{t(lang, 'access.mode.private')}</RNText>
+      </View>
+      <RNText style={styles.connectorAccessNote}>
+        {t(lang, 'access.private.hint').replace('{owner}', ownerName)}
+      </RNText>
+    </View>
+  ) : null;
+
+  const freeBubble = showFree ? (
+    <View style={[styles.connectorBubble, styles.connectorAccessBubble, styles.connectorAccessBubbleInfoInset]}>
+      <Pressable
+        onPress={onOpenInfoFree}
+        style={({ pressed }) => [styles.connectorIdleRfidInfoIcon, pressed && styles.connectorBubblePressed]}
+        hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel={t(lang, 'info.reader.title')}
+      >
+        <AppIcon name="info-circle" size={52} />
+      </Pressable>
+      <View style={styles.connectorAccessHeaderRow}>
+        <AppIcon name="unlock" size={52} />
+        <RNText style={styles.connectorAccessTitle}>{t(lang, 'access.mode.free')}</RNText>
+      </View>
+      <RNText style={styles.connectorAccessNote}>{t(lang, 'access.free.hint')}</RNText>
+    </View>
+  ) : null;
+
+  return (
+    <>
+      {showFree ? freeBubble : null}
+      {showPrivateOnly ? privateBubble : null}
+      {showPaid ? paidBubble : null}
+      {showEroaming ? eroamingBubble : null}
+      <ConnectorPolicyExtraFeesModal
+        visible={extraFeesModalOpen}
+        onClose={() => setExtraFeesModalOpen(false)}
+        lang={lang}
+        currency={currency}
+        connector={connector}
+        vatRate={vatRate}
+      />
+      <ConnectorEroamingListModal
+        visible={eroamingListModalOpen}
+        onClose={() => setEroamingListModalOpen(false)}
+        lang={lang}
+        operators={emps}
+      />
+    </>
   );
 }
 
@@ -2017,12 +5137,15 @@ function formatEmailTruncatedAfterAt(email: string): string {
   return `${s.slice(0, at + 1)}...`;
 }
 
-/** Rovnaká veľkosť ikon ako na idle karte „Voľný“ (napr. charging-station, car-side-bolt). */
-const CONNECTOR_IDLE_ROW_ICON_SIZE = 52;
-/** Fixná šírka stĺpca pre ikony (glyph + malý okraj), zarovnanie riadkov. */
-const CONNECTOR_SESSION_ICON_COL_WIDTH = 60;
 /** Spoločný obsah: stav stanica/auto + kW + kWh (Príprava aj Nabíjanie). */
-function ConnectorPreparingStatusInner({ connector }: { connector: TpConnector }) {
+function ConnectorPreparingStatusInner({
+  connector,
+  hideStationVehicleRow,
+}: {
+  connector: TpConnector;
+  /** Detail nabíjania (live bublina): prvý riadok (stanica/auto/oddeľovač) sa nezobrazuje. */
+  hideStationVehicleRow?: boolean;
+}) {
   const budgetAmps = connector.budgetAmps ?? 10;
   const budgetOk = budgetAmps >= 6;
   const vehicleOk = (connector.vehicleSignalV ?? 6) === 6;
@@ -2031,17 +5154,19 @@ function ConnectorPreparingStatusInner({ connector }: { connector: TpConnector }
 
   return (
     <>
-      <View style={styles.connectorPreparingDetailIconRow}>
-        <View style={styles.connectorPreparingDetailPair}>
-          <AppIcon name="charging-station" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
-          <Text style={styles.connectorPrepareStatusMark}>{budgetOk ? '✓' : '✕'}</Text>
+      {hideStationVehicleRow ? null : (
+        <View style={styles.connectorPreparingDetailIconRow}>
+          <View style={styles.connectorPreparingDetailPair}>
+            <AppIcon name="charging-station" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+            <Text style={styles.connectorPrepareStatusMark}>{budgetOk ? '✓' : '✕'}</Text>
+          </View>
+          <View style={styles.connectorPreparingDetailPairDivider} />
+          <View style={styles.connectorPreparingDetailPair}>
+            <AppIcon name="car-side-bolt" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+            <Text style={styles.connectorPrepareStatusMark}>{vehicleOk ? '✓' : '✕'}</Text>
+          </View>
         </View>
-        <View style={styles.connectorPreparingDetailPairDivider} />
-        <View style={styles.connectorPreparingDetailPair}>
-          <AppIcon name="car-side-bolt" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
-          <Text style={styles.connectorPrepareStatusMark}>{vehicleOk ? '✓' : '✕'}</Text>
-        </View>
-      </View>
+      )}
       <View style={styles.connectorPreparingDetailMetricRowLeft}>
         <View style={styles.connectorVehicleSessionIconColumn}>
           <AppIcon name="bolt" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
@@ -2085,18 +5210,20 @@ function ConnectorChargingLiveBubble({
   currency: string;
   sessionLoggedIn: boolean;
 }) {
-  const [breakdownOpen, setBreakdownOpen] = useState(false);
   const vatRate = mockConfig.station.vatRate ?? 0;
   const txTotalSec =
     connector.txTotalSec ?? parseHmsToSec(connector.activeTx?.chargingTime) ?? 0;
   const chargingActiveSec = connector.chargingActiveSec ?? Math.max(0, txTotalSec);
   const { energyInc, parkingInc, sessionInc, totalInc } = chargingSessionPriceIncVat(connector, vatRate);
+  const feesInc = parkingInc + sessionInc;
+  const showEnergyFeesSplit =
+    sessionLoggedIn && energyInc > 0.001 && feesInc > 0.001;
   const fmt = (n: number) => `${n.toFixed(2)} ${currency}`;
 
   return (
     <View style={[styles.connectorBubble, styles.connectorAccessBubble, styles.connectorChargingLiveBubble]}>
       <ContentIconScaleContext.Provider value={1}>
-        <ConnectorPreparingStatusInner connector={connector} />
+        <ConnectorPreparingStatusInner connector={connector} hideStationVehicleRow />
         <View style={styles.connectorPreparingDetailMetricRowLeft}>
           <View style={styles.connectorVehicleSessionIconColumn}>
             <AppIcon name="clock" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
@@ -2124,51 +5251,25 @@ function ConnectorChargingLiveBubble({
                 <AppIcon name="coins" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
               </View>
               <View style={styles.connectorChargingTimeValueCol}>
-                <Text style={styles.connectorChargingTimeLabel}>{t(lang, 'connector.charging.total')}</Text>
                 <Text style={styles.connectorPreparingDetailMetricValue} numberOfLines={1}>
                   {fmt(totalInc)}
                 </Text>
               </View>
             </View>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={breakdownOpen ? t(lang, 'connector.charging.less') : t(lang, 'connector.charging.more')}
-              onPress={() => setBreakdownOpen((o) => !o)}
-              style={({ pressed }) => [
-                styles.connectorChargingMorePressable,
-                pressed && styles.connectorBubblePressed,
-              ]}
-            >
-              <Text style={styles.connectorIdlePriceToggleText}>
-                {breakdownOpen ? t(lang, 'connector.charging.less') : t(lang, 'connector.charging.more')}
-              </Text>
-            </Pressable>
-            {breakdownOpen ? (
-              <View style={styles.connectorChargingBreakdownList}>
-                {energyInc > 0.001 ? (
-                  <View style={styles.connectorChargingBreakdownRow}>
-                    <Text style={styles.connectorChargingFeeMeta}>{t(lang, 'connector.charging.breakdown.kwh')}</Text>
-                    <Text style={styles.connectorPreparingDetailMetricValue} numberOfLines={1}>
-                      {fmt(energyInc)}
-                    </Text>
-                  </View>
-                ) : null}
-                {parkingInc > 0.001 ? (
-                  <View style={styles.connectorChargingBreakdownRow}>
-                    <Text style={styles.connectorChargingFeeMeta}>{t(lang, 'connector.charging.breakdown.parking')}</Text>
-                    <Text style={styles.connectorPreparingDetailMetricValue} numberOfLines={1}>
-                      {fmt(parkingInc)}
-                    </Text>
-                  </View>
-                ) : null}
-                {sessionInc > 0.001 ? (
-                  <View style={styles.connectorChargingBreakdownRow}>
-                    <Text style={styles.connectorChargingFeeMeta}>{t(lang, 'connector.charging.breakdown.session')}</Text>
-                    <Text style={styles.connectorPreparingDetailMetricValue} numberOfLines={1}>
-                      {fmt(sessionInc)}
-                    </Text>
-                  </View>
-                ) : null}
+            {showEnergyFeesSplit ? (
+              <View style={[styles.connectorChargingBreakdownList, styles.connectorChargingPriceBreakdownIndent]}>
+                <View style={styles.connectorChargingBreakdownRow}>
+                  <Text style={styles.connectorChargingFeeMeta}>{t(lang, 'connector.charging.breakdown.kwh')}</Text>
+                  <Text style={styles.connectorPreparingDetailMetricValue} numberOfLines={1}>
+                    {fmt(energyInc)}
+                  </Text>
+                </View>
+                <View style={styles.connectorChargingBreakdownRow}>
+                  <Text style={styles.connectorChargingFeeMeta}>{t(lang, 'connector.charging.breakdown.fees')}</Text>
+                  <Text style={styles.connectorPreparingDetailMetricValue} numberOfLines={1}>
+                    {fmt(feesInc)}
+                  </Text>
+                </View>
               </View>
             ) : null}
           </>
@@ -2212,11 +5313,10 @@ function ConnectorDisconnectSummaryBubble({ connector }: { connector: TpConnecto
           <View style={styles.connectorVehicleSessionIconColumn}>
             <AppIcon name="battery-half" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
           </View>
-          <View style={styles.connectorChargingTimeValueCol}>
-            <Text style={styles.connectorPreparingDetailMetricValue} numberOfLines={1}>
-              {`${energyNumberText} kWh`}
-            </Text>
-          </View>
+          <Text style={styles.connectorPreparingDetailMetricValue} numberOfLines={1}>
+            {energyNumberText}
+          </Text>
+          <Text style={styles.connectorPreparingDetailMetricUnit}>kWh</Text>
         </View>
       </ContentIconScaleContext.Provider>
     </View>
@@ -2332,9 +5432,15 @@ function ConnectorSessionAccessBubble({
   sessionLoggedIn: boolean;
 }) {
   const [accessCycleIndex, setAccessCycleIndex] = useState(() => sessionAccessCycleIndexForConnector(connector));
+  const [extraFeesModalOpen, setExtraFeesModalOpen] = useState(false);
+  const vatRate = mockConfig.station.vatRate ?? 0;
 
   useEffect(() => {
     setAccessCycleIndex(sessionAccessCycleIndexForConnector(connector));
+  }, [connector.id]);
+
+  useEffect(() => {
+    setExtraFeesModalOpen(false);
   }, [connector.id]);
 
   const accessLabel = t(lang, 'connector.session.label.access');
@@ -2350,55 +5456,72 @@ function ConnectorSessionAccessBubble({
   const showExtraFees = sessionTxShowAdditionalFeesLine(connector, Boolean(showPriceBlock));
 
   return (
-    <View style={[styles.connectorBubble, styles.connectorAccessBubble, styles.connectorSessionAccessBubbleStack]}>
-      <View style={styles.connectorVehicleSessionRow}>
-        <View
-          style={styles.connectorVehicleSessionIconColumn}
-          accessible
-          accessibilityLabel={accessLabel}
-          accessibilityRole="text"
-        >
-          <ContentIconScaleContext.Provider value={1}>
-            <AppIcon name="key" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
-          </ContentIconScaleContext.Provider>
-        </View>
-        <View style={styles.connectorVehicleSessionValueFitWrap}>
-          <View style={styles.connectorVehicleSessionValueFitVertCenter}>
-            <Pressable
-              onPress={cycleAccessPreview}
-              accessibilityRole="button"
-              accessibilityLabel={`${accessLabel}: ${accessValue}`}
-              hitSlop={10}
-              style={({ pressed }) => [
-                styles.connectorVehicleSessionAccessValuePressableInner,
-                pressed && styles.connectorBubblePressed,
-              ]}
-            >
-              <FitText
-                style={styles.connectorVehicleSessionValueFit}
-                minScale={0.22}
-                targetChars={22}
-                numberOfLines={1}
+    <>
+      <View style={[styles.connectorBubble, styles.connectorAccessBubble, styles.connectorSessionAccessBubbleStack]}>
+        <View style={styles.connectorVehicleSessionRow}>
+          <View
+            style={styles.connectorVehicleSessionIconColumn}
+            accessible
+            accessibilityLabel={accessLabel}
+            accessibilityRole="text"
+          >
+            <ContentIconScaleContext.Provider value={1}>
+              <AppIcon name="key" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />
+            </ContentIconScaleContext.Provider>
+          </View>
+          <View style={styles.connectorVehicleSessionValueFitWrap}>
+            <View style={styles.connectorVehicleSessionValueFitVertCenter}>
+              <Pressable
+                onPress={cycleAccessPreview}
+                accessibilityRole="button"
+                accessibilityLabel={`${accessLabel}: ${accessValue}`}
+                hitSlop={10}
+                style={({ pressed }) => [
+                  styles.connectorVehicleSessionAccessValuePressableInner,
+                  pressed && styles.connectorBubblePressed,
+                ]}
               >
-                {accessValue}
-              </FitText>
-            </Pressable>
+                <FitText
+                  style={styles.connectorVehicleSessionValueFit}
+                  minScale={0.22}
+                  targetChars={22}
+                  numberOfLines={1}
+                >
+                  {accessValue}
+                </FitText>
+              </Pressable>
+            </View>
           </View>
         </View>
-      </View>
-      {showPriceBlock && unitPrice != null ? (
-        <>
-          <RNText style={styles.connectorAccessPriceHero}>
-            {`${unitPrice.toFixed(2)} ${currency}/kWh`}
-          </RNText>
-          {showExtraFees ? (
-            <RNText style={styles.connectorAccessNote}>
-              {`+ ${t(lang, 'connector.detail.extraFees')}`}
+        {showPriceBlock && unitPrice != null ? (
+          <>
+            <RNText style={styles.connectorAccessPriceHero}>
+              {`${unitPrice.toFixed(2)} ${currency}/kWh`}
             </RNText>
-          ) : null}
-        </>
-      ) : null}
-    </View>
+            {showExtraFees ? (
+              <Pressable
+                onPress={() => setExtraFeesModalOpen(true)}
+                style={({ pressed }) => [styles.connectorAccessLinkPressable, pressed && styles.connectorBubblePressed]}
+                accessibilityRole="button"
+                accessibilityLabel={t(lang, 'connector.detail.extraFees')}
+              >
+                <RNText style={[styles.connectorAccessNote, styles.connectorAccessLinkText]}>
+                  {`+ ${t(lang, 'connector.detail.extraFees')}`}
+                </RNText>
+              </Pressable>
+            ) : null}
+          </>
+        ) : null}
+      </View>
+      <ConnectorPolicyExtraFeesModal
+        visible={extraFeesModalOpen}
+        onClose={() => setExtraFeesModalOpen(false)}
+        lang={lang}
+        currency={currency}
+        connector={connector}
+        vatRate={vatRate}
+      />
+    </>
   );
 }
 
@@ -2432,14 +5555,19 @@ const ConnectorVehicleSessionBubble = forwardRef(function ConnectorVehicleSessio
   const [endChargeWaitOpen, setEndChargeWaitOpen] = useState(false);
   const [endChargeWaitPhase, setEndChargeWaitPhase] = useState<'loading' | 'success' | 'error'>('loading');
   const endChargeWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** ~+30 % dĺžky oproti krátkemu mocku — na kontrolu zmenšovania (FitText / viac riadkov). */
-  const mockVehicleName = devVar(lang, 'Škoda Enyaq 80 Max', 'vehicle.name');
-  const mockPlate = devVar(lang, 'BA 123XY', 'vehicle.plate');
-  const mockEmail = devVar(lang, 'jozef.novak.skoda@example.com', 'vehicle.email');
+  /** Preferuj runtime aktívnej transakcie; DEV fallback ostáva len pre staré mock stavy bez doplnených dát. */
+  const mockVehicleName = connector.activeTx?.vehicleName ?? devVar(lang, 'Škoda Enyaq 80 Max', 'vehicle.name');
+  const mockPlate = connector.activeTx?.vehiclePlate ?? devVar(lang, 'BA 123XY', 'vehicle.plate');
+  const mockEmail =
+    connector.activeTx?.driverEmail ?? devVar(lang, 'jozef.novak.skoda@example.com', 'vehicle.email');
   const nameT = mockVehicleName.trim();
   const plateT = mockPlate.trim();
   const emailT = mockEmail.trim();
+  const showVehicleIdentityBeforeLogin = plateT.length > 0;
   const showNoRegistration = sessionLoggedIn && !nameT && !plateT && !emailT;
+  const showVehicleSessionBubbleContent = sessionLoggedIn
+    ? showNoRegistration || plateT.length > 0 || nameT.length > 0 || emailT.length > 0
+    : showVehicleIdentityBeforeLogin;
 
   const clearEndChargeWaitTimer = useCallback(() => {
     if (endChargeWaitTimerRef.current != null) {
@@ -2669,37 +5797,41 @@ const ConnectorVehicleSessionBubble = forwardRef(function ConnectorVehicleSessio
 
   return (
     <>
-      <View style={[styles.connectorBubble, styles.connectorAccessBubble, styles.connectorVehicleSessionBubble]}>
-        <View style={styles.connectorVehicleSessionFields}>
-          {!sessionLoggedIn ? (
-            plateT ? iconPlateRow : null
-          ) : showNoRegistration ? (
-            <View style={styles.connectorVehicleSessionNoRegWrap}>
-              <FitText
-                style={styles.connectorVehicleSessionNoRegText}
-                minScale={0.28}
-                targetChars={28}
-                numberOfLines={2}
-              >
-                {t(lang, 'connector.session.noRegistration')}
-              </FitText>
-            </View>
-          ) : (
-            <>
-              {plateT ? iconPlateRow : null}
-              {nameT ? (
-                <VehicleSessionField
-                  labelA11y={vehicleLabel}
-                  labelSlot={<AppIcon name="car" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />}
-                  value={nameT}
-                  valueLines={2}
-                />
-              ) : null}
-              {emailT ? driverRow : null}
-            </>
-          )}
+      {showVehicleSessionBubbleContent ? (
+        <View style={[styles.connectorBubble, styles.connectorAccessBubble, styles.connectorVehicleSessionBubble]}>
+          <View style={styles.connectorVehicleSessionFields}>
+            {!sessionLoggedIn ? (
+              <>
+                {plateT ? iconPlateRow : null}
+              </>
+            ) : showNoRegistration ? (
+              <View style={styles.connectorVehicleSessionNoRegWrap}>
+                <FitText
+                  style={styles.connectorVehicleSessionNoRegText}
+                  minScale={0.28}
+                  targetChars={28}
+                  numberOfLines={2}
+                >
+                  {t(lang, 'connector.session.noRegistration')}
+                </FitText>
+              </View>
+            ) : (
+              <>
+                {plateT ? iconPlateRow : null}
+                {nameT ? (
+                  <VehicleSessionField
+                    labelA11y={vehicleLabel}
+                    labelSlot={<AppIcon name="car" size={CONNECTOR_IDLE_ROW_ICON_SIZE} />}
+                    value={nameT}
+                    valueLines={2}
+                  />
+                ) : null}
+                {emailT ? driverRow : null}
+              </>
+            )}
+          </View>
         </View>
-      </View>
+      ) : null}
 
       <Modal
         visible={txPinModalOpen}
@@ -2737,8 +5869,14 @@ const ConnectorVehicleSessionBubble = forwardRef(function ConnectorVehicleSessio
               accessibilityRole="button"
               accessibilityLabel={t(lang, 'info.reader.back')}
             >
-              <View style={[styles.stationBackStrip, { pointerEvents: 'none' }]}>
-                <RNText style={styles.stationBackArrow}>‹</RNText>
+              <View
+                style={[
+                  styles.stationBackStrip,
+                  stackedLayout && styles.overlayBackStripZoom,
+                  { pointerEvents: 'none' },
+                ]}
+              >
+                <RNText style={[styles.stationBackArrow, stackedLayout && styles.overlayBackStripArrowZoom]}>‹</RNText>
               </View>
               <View style={[styles.overlayTitleRow, styles.overlayTitleRowIntegratedBack]}>
                 <View style={styles.overlayTitleTextShrinkStandalone}>
@@ -2752,10 +5890,11 @@ const ConnectorVehicleSessionBubble = forwardRef(function ConnectorVehicleSessio
               <ServicePinContent
                 compact
                 title={t(lang, 'connector.session.transactionPinPrompt')}
+                pinLength={TRANSACTION_SESSION_PIN_LENGTH}
                 pinInput={txPinInput}
                 error={txPinError}
                 onInput={(digit) => {
-                  if (txPinInput.length >= SERVICE_PIN_LENGTH) return;
+                  if (txPinInput.length >= TRANSACTION_SESSION_PIN_LENGTH) return;
                   setTxPinError('');
                   setTxPinInput((prev) => `${prev}${digit}`);
                 }}
@@ -2764,7 +5903,7 @@ const ConnectorVehicleSessionBubble = forwardRef(function ConnectorVehicleSessio
                   setTxPinInput((prev) => prev.slice(0, -1));
                 }}
                 onSubmit={() => {
-                  if (txPinInput === SERVICE_PIN) {
+                  if (txPinInput === TRANSACTION_SESSION_PIN) {
                     onSessionLoggedInChange(true);
                     setTxPinModalOpen(false);
                     setTxPinInput('');
@@ -2874,9 +6013,11 @@ function HomeOverviewScreen({
 }) {
   const connectStartByConnectorRef = useRef<Record<string, number>>({});
   const singleConnector = connectors.length === 1;
-  const focusedConnector = singleConnector
-    ? connectors[0] ?? null
-    : connectors.find((item) => item.id === selectedConnectorId) ?? null;
+  /** Rovnaký flow ako pri viacerých konektoroch: najprv prehľad (bubliny), detail až po výbere. */
+  const focusedConnector =
+    selectedConnectorId != null
+      ? connectors.find((item) => item.id === selectedConnectorId) ?? null
+      : null;
   const [idlePriceExpanded, setIdlePriceExpanded] = useState(false);
   const [sessionLoggedIn, setSessionLoggedIn] = useState(false);
   const vehicleSessionBubbleRef = useRef<ConnectorVehicleSessionBubbleHandle | null>(null);
@@ -2894,7 +6035,7 @@ function HomeOverviewScreen({
   const renderOverviewCard = (connector: TpConnector, cardIndex: number) => {
     const connectorPowerBadge = connector.powerType === 'AC' ? `AC${connector.phases}` : 'DC';
     const maxPowerKw = calculateMaxPowerKw(connector.powerType, connector.phases, connector.maxAmps);
-    const isRightConnector = !singleConnector && cardIndex % 2 === 1;
+    const isRightConnector = singleConnector || cardIndex % 2 === 1;
     const status = connector.ocpp.status;
     const isDisconnectEv = status === 'disconnectEV';
     const isFaultNoTxOverview = status === 'faultedWithoutTransa';
@@ -3083,14 +6224,7 @@ function HomeOverviewScreen({
                 hitSlop={8}
                 onPress={() => onSelectConnector(connector.id)}
               >
-                <View
-                  style={[
-                    styles.connectorOverviewCellSplit,
-                    !isRightConnector
-                      ? styles.connectorOverviewCellSplitPadLeft
-                      : styles.connectorOverviewCellSplitPadRight,
-                  ]}
-                >
+                <View style={styles.connectorOverviewCellSplit}>
                   <View style={styles.connectorOverviewCellHalf}>
                     <ConnectorOverviewTimeInline iconName="clock" timeHms={formatSecToHms(txTotalSec)} />
                   </View>
@@ -3116,14 +6250,9 @@ function HomeOverviewScreen({
                   </FitText>
                   <View style={styles.connectorOverviewUnitRowFull}>
                     <AppIcon name="battery-half" size={52} />
-                    <FitText
-                      style={styles.connectorOverviewLiveUnitTextFull}
-                      minScale={0.5}
-                      targetChars={4}
-                      numberOfLines={1}
-                    >
+                    <RNText allowFontScaling={false} style={styles.connectorOverviewLiveUnitTextFull}>
                       kWh
-                    </FitText>
+                    </RNText>
                   </View>
                 </View>
               </Pressable>
@@ -3168,9 +6297,11 @@ function HomeOverviewScreen({
             <View
               style={[
                 styles.connectorOverviewCellSplit,
-                !isRightConnector
-                  ? styles.connectorOverviewCellSplitPadLeft
-                  : styles.connectorOverviewCellSplitPadRight,
+                showSecondBubbleAction
+                  ? !isRightConnector
+                    ? styles.connectorOverviewCellSplitPadLeft
+                    : styles.connectorOverviewCellSplitPadRight
+                  : null,
               ]}
             >
               <View style={styles.connectorOverviewCellHalf}>
@@ -3276,9 +6407,9 @@ function HomeOverviewScreen({
                 </FitText>
                 <View style={styles.connectorOverviewUnitRowFull}>
                   <AppIcon name="battery-half" size={52} />
-                  <FitText style={styles.connectorOverviewLiveUnitTextFull} minScale={0.5} targetChars={4} numberOfLines={1}>
+                  <RNText allowFontScaling={false} style={styles.connectorOverviewLiveUnitTextFull}>
                     kWh
-                  </FitText>
+                  </RNText>
                 </View>
               </View>
             ) : (
@@ -3291,9 +6422,9 @@ function HomeOverviewScreen({
                       </FitText>
                       <View style={styles.connectorOverviewUnitRow}>
                         <AppIcon name="bolt" size={52} />
-                        <FitText style={styles.connectorOverviewLiveUnitText} minScale={0.5} targetChars={3} numberOfLines={1}>
+                        <RNText allowFontScaling={false} style={styles.connectorOverviewLiveUnitText}>
                           kW
-                        </FitText>
+                        </RNText>
                       </View>
                     </>
                   ) : (
@@ -3311,9 +6442,9 @@ function HomeOverviewScreen({
                       </FitText>
                       <View style={styles.connectorOverviewUnitRow}>
                         <AppIcon name="battery-half" size={52} />
-                        <FitText style={styles.connectorOverviewLiveUnitText} minScale={0.5} targetChars={4} numberOfLines={1}>
+                        <RNText allowFontScaling={false} style={styles.connectorOverviewLiveUnitText}>
                           kWh
-                        </FitText>
+                        </RNText>
                       </View>
                     </>
                   ) : (
@@ -3388,18 +6519,16 @@ function HomeOverviewScreen({
     (isIdleStartUi || isDisconnectEvFocused) &&
     !isFaultNoTxFocused &&
     getAccessModeFromConnector(focusedConnector) !== 'free' ? (
-      <Pressable
-        style={({ pressed }) => [
-          styles.connectorBubble,
-          styles.connectorPrimaryActionShell,
-          styles.connectorBubbleClickable,
-          pressed && styles.connectorBubblePressed,
-        ]}
-        onPress={onOpenInfoHelp2}
-      >
-        <View style={styles.connectorIdleRfidInfoIcon}>
+      <View style={[styles.connectorBubble, styles.connectorPrimaryActionShell, styles.connectorAccessBubbleInfoInset]}>
+        <Pressable
+          onPress={onOpenInfoHelp2}
+          style={({ pressed }) => [styles.connectorIdleRfidInfoIcon, pressed && styles.connectorBubblePressed]}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel={t(lang, 'info.reader.title')}
+        >
           <AppIcon name="info-circle" size={52} />
-        </View>
+        </Pressable>
         <View style={[styles.connectorPrimaryActionContentRow, styles.connectorPrimaryActionContentRowInClickableBubble]}>
           <View style={styles.connectorPrimaryActionCenterSpacer} />
           <View style={styles.connectorPrimaryActionCluster}>
@@ -3412,7 +6541,7 @@ function HomeOverviewScreen({
           </View>
           <View style={styles.connectorPrimaryActionCenterSpacer} />
         </View>
-      </Pressable>
+      </View>
     ) : null;
 
   const idleAccessBubble =
@@ -3422,7 +6551,6 @@ function HomeOverviewScreen({
         currency={currency}
         lang={lang}
         ownerName={ownerName}
-        initialPreviewIndex={ocppStatus === 'EVconnected' ? 3 : undefined}
         onOpenInfoFree={() => openInfo('info-free', 'home')}
         onOpenInfoPricing={() => openInfo('info-pricing', 'home')}
         onOpenInfoEroaming={() => openInfo('info-eroaming', 'home')}
@@ -3434,6 +6562,9 @@ function HomeOverviewScreen({
   ) : null;
 
   const faultNoTxSupportBubble = isFaultNoTxFocused ? (
+    <ConnectorFaultNoTxSupportBubble lang={lang} onPress={onOpenSupport} />
+  ) : null;
+  const faultWithTxSupportBubble = ocppStatus === 'faultedWithTransa' ? (
     <ConnectorFaultNoTxSupportBubble lang={lang} onPress={onOpenSupport} />
   ) : null;
 
@@ -3572,6 +6703,8 @@ function HomeOverviewScreen({
         </Pressable>
 
         {sessionTopActionBubble}
+
+        {faultWithTxSupportBubble}
 
         {faultNoTxSupportBubble}
 
@@ -4296,6 +7429,20 @@ const CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT = lh(CONNECTOR_BUBBLE_SECONDARY_FON
  */
 const CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT = 96;
 
+/** Rovnaká veľkosť ikon ako na idle karte „Voľný“ (napr. charging-station, car-side-bolt). */
+const CONNECTOR_IDLE_ROW_ICON_SIZE = 52;
+/** Fixná šírka stĺpca pre ikony (glyph + malý okraj), zarovnanie riadkov. */
+const CONNECTOR_SESSION_ICON_COL_WIDTH = 60;
+/** Riadok sumy v RFID modáli — rovnaká výška ako skutočný riadok (ikona vs. text). */
+const STATION_RFID_COST_ROW_MIN_HEIGHT = Math.max(
+  CONNECTOR_IDLE_ROW_ICON_SIZE,
+  CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT
+);
+/** Riadok výberu vozidla (ŠPZ + názov) — vyšší než 96px kvôli dvom riadkom bez orezania. */
+const STATION_RFID_PICKER_VEHICLE_ROW_MIN_HEIGHT = Math.round(
+  CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT + CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT + 20
+);
+
 /** Predelovacie čiary (hlavička stanice, konektor, overview, Príprava, Pomoc): 2 px, čierna @ 0.28. */
 const KIOSK_DIVIDER_STROKE = 2;
 const KIOSK_DIVIDER_COLOR = '#000000';
@@ -4320,6 +7467,601 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     minWidth: 200,
     minHeight: 160,
+  },
+  stationRfidModalRoot: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 8,
+  },
+  stationRfidModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.42)',
+  },
+  stationRfidModalShell: {
+    width: '100%',
+    maxWidth: KIOSK_WIDTH - 24,
+    maxHeight: '92%',
+    gap: 8,
+  },
+  stationRfidModalCard: {
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 16,
+    backgroundColor: '#ffffff',
+    width: '100%',
+  },
+  stationRfidModalContent: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  stationRfidSummaryCard: {
+    borderWidth: 2,
+    borderColor: '#000000',
+    borderRadius: 14,
+    padding: 12,
+    gap: 12,
+  },
+  stationRfidSummaryTop: {
+    width: '100%',
+    gap: 8,
+  },
+  stationRfidSummaryUnknownBlock: {
+    width: '100%',
+    gap: 10,
+  },
+  stationRfidSummaryUnknownRoamingLine: {
+    width: '100%',
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: lh(CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE, 1.2),
+    fontWeight: '700',
+  },
+  stationRfidSummaryBlockedBanner: {
+    width: '100%',
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+  },
+  stationRfidSummaryUidLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidSummaryIconSlot: {
+    width: CONNECTOR_SESSION_ICON_COL_WIDTH,
+    height: CONNECTOR_SESSION_ICON_COL_WIDTH,
+    borderWidth: 2,
+    borderColor: '#000000',
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  /** Rovnaká šírka ako `stationRfidSummaryIconSlot` — otáznik pod ikonou karty. */
+  stationRfidSummaryLeadIconCol: {
+    width: CONNECTOR_SESSION_ICON_COL_WIDTH,
+    flexShrink: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Dva riadky textu (ŠPZ + názov, e-mail pred/po @) — ikona v `stationRfidSummaryUidLine` sa vystredí k celému bloku. */
+  stationRfidSummaryStackedUidCol: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+    justifyContent: 'center',
+  },
+  /** Summary stack lines need fixed-width text styles without flex, unlike `stationRfidSummaryUid`. */
+  stationRfidSummaryPrimaryStackLine: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidSummarySecondaryStackLine: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+    width: '100%',
+    minWidth: 0,
+  },
+  /** Rovnaké ako `connectorNameOverview` na prehľade konektora. */
+  stationRfidSummaryUid: {
+    flex: 1,
+    minWidth: 0,
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+  },
+  /** Dva riadky pod sebou v `stationRfidSummaryStackedUidCol` — bez `flex: 1`, aby sa nevťahovali výška navzájom. */
+  stationRfidSummaryUidStackLine: {
+    flex: 0,
+    flexGrow: 0,
+    alignSelf: 'stretch',
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidConnectorGrid: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  stationRfidConnectorGridStack: {
+    flexDirection: 'column',
+  },
+  stationRfidConnectorGridCell: {
+    flex: 1,
+    minWidth: 0,
+  },
+  stationRfidConnectorGridCellStack: {
+    width: '100%',
+  },
+  /** Blokovaná karta: len názov konektora + do-not-enter (rovnaká veľkosť písma ako UID v hornej bublinke). */
+  stationRfidBlockedConnectorBubble: {
+    borderWidth: 2,
+    borderColor: '#000000',
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    gap: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidBlockedConnectorSpot: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+    textAlign: 'center',
+    width: '100%',
+  },
+  stationRfidConnectorPanel: {
+    flex: 1,
+    borderWidth: 2,
+    borderColor: '#000000',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    gap: 8,
+    justifyContent: 'flex-start',
+  },
+  /** Rovnaká veľkosť ako `stationRfidConnectorSpot` / tlačidlá; ikona `coins` ako pri live nabíjaní. */
+  stationRfidConnectorCostLine: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+    flex: 1,
+    minWidth: 0,
+    width: '100%',
+  },
+  /** Prázdny riadok rovnakej výšky ako riadok so sumou (zarovnanie akcií medzi panelmi). */
+  stationRfidConnectorCostRowPlaceholder: {
+    minHeight: STATION_RFID_COST_ROW_MIN_HEIGHT,
+  },
+  stationRfidConnectorBlockedRow: {
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    minHeight: CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT,
+    maxHeight: CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ffffff',
+  },
+  stationRfidConnectorReasonBox: {
+    borderWidth: 2,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidConnectorReasonText: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT,
+    fontWeight: '700',
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidConnectorSpot: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+  },
+  /** Rovnaká ako stav vedľa parkovacieho miesta na prehľade (`connectorNameOverviewStatus`). */
+  stationRfidConnectorStatus: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+  },
+  stationRfidConnectorInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    minWidth: 0,
+  },
+  stationRfidConnectorInfoText: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT,
+    fontWeight: '700',
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  stationRfidConnectorDetailText: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: lh(CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE, 1.18),
+    fontWeight: '700',
+  },
+  stationRfidConnectorActions: {
+    gap: 8,
+    width: '100%',
+  },
+  /** Rovnaká výška a pruh ako `connectorPrimaryActionShell` / session akcie. */
+  stationRfidActionButton: {
+    position: 'relative',
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+  },
+  /** Pevná výška len pri 1× — pri lupe ju v `StationRfidQuickAction` prepíšeme škálovanou min. výškou bez maxHeight. */
+  stationRfidActionButtonHeightLock: {
+    minHeight: CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT,
+    maxHeight: CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT,
+  },
+  /** Riadok v modálnom zozname vozidiel — dva riadky textu, bez `maxHeight` 96 (inak sa orezá). */
+  stationRfidPickerVehicleRowButton: {
+    position: 'relative',
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    minHeight: STATION_RFID_PICKER_VEHICLE_ROW_MIN_HEIGHT,
+    overflow: 'hidden',
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+  },
+  stationRfidActionButtonSecondary: {
+    borderWidth: 2,
+  },
+  stationRfidActionButtonMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    minWidth: 0,
+    minHeight: CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT,
+  },
+  stationRfidActionButtonMainStripRight: {
+    paddingLeft: 12,
+    paddingRight: 44,
+  },
+  stationRfidActionButtonMainStripLeft: {
+    paddingLeft: 44,
+    paddingRight: 12,
+  },
+  stationRfidPickerVehicleRowMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    minWidth: 0,
+    minHeight: STATION_RFID_PICKER_VEHICLE_ROW_MIN_HEIGHT,
+    paddingLeft: 12,
+    paddingRight: 44,
+  },
+  stationRfidPickerVehiclePlateLine: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+    width: '100%',
+    minWidth: 0,
+  },
+  /** Rovnaká typografia ako `connectorPrimaryActionLabelText`. */
+  stationRfidModalActionLabelText: {
+    flex: 1,
+    minWidth: 0,
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_SESSION_VALUE_LINE_HEIGHT,
+    fontWeight: '900',
+  },
+  stationRfidActionButtonStrip: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 34,
+    backgroundColor: '#000000',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stationRfidActionButtonStripRight: {
+    right: 0,
+  },
+  stationRfidActionButtonStripLeft: {
+    left: 0,
+  },
+  stationRfidActionButtonArrow: {
+    color: '#ffffff',
+    fontSize: TYPO.title,
+    lineHeight: lh(TYPO.title, 1),
+    fontWeight: '900',
+  },
+  stationRfidConnectorNoActionBox: {
+    borderWidth: 2,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stationRfidConnectorNoActionText: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: lh(CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE, 1.15),
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  stationRfidFooterActions: {
+    width: '100%',
+    gap: 8,
+  },
+  /** Späť vľavo, primárna akcia vpravo — jeden riadok. */
+  stationRfidFooterActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'stretch',
+    gap: 10,
+  },
+  stationRfidFooterRowActionCell: {
+    flex: 1,
+    minWidth: 0,
+  },
+  stationRfidFooterRowAction: {
+    width: '100%',
+  },
+  stationRfidStepWrap: {
+    gap: 10,
+  },
+  stationRfidStepTitle: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  stationRfidStepHint: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  stationRfidTitleWithIconRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidStepTitleInIconRow: {
+    flex: 1,
+    minWidth: 0,
+    textAlign: 'left',
+  },
+  /** Nadpisy „Priestor“ / „Vozidlo“ — celá skupina ikona+text vycentrovaná; ikona hneď vedľa nadpisu (nie na ľavom okraji obrazovky). */
+  stationRfidStepHeadingOuter: {
+    width: '100%',
+    minWidth: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  stationRfidStepHeadingCluster: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    maxWidth: '100%',
+    minWidth: 0,
+  },
+  /** `maxWidth` na obale merania pre FitText / ZoomAdaptiveText. */
+  stationRfidStepTitleHeadingClusterText: {
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: 420,
+    textAlign: 'left',
+  },
+  stationRfidPickerVehicleLines: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'column',
+    gap: 4,
+    justifyContent: 'center',
+  },
+  stationRfidPickerVehicleNameLine: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT,
+    fontWeight: '800',
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidPickRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+    minWidth: 0,
+    borderWidth: 2,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    minHeight: CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT,
+  },
+  stationRfidPickRowSelected: {
+    borderWidth: 4,
+  },
+  stationRfidPickRowLabel: {
+    flex: 1,
+    minWidth: 0,
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_SESSION_VALUE_LINE_HEIGHT,
+    fontWeight: '900',
+    textAlign: 'left',
+  },
+  stationRfidConfirmSummary: {
+    width: '100%',
+    minWidth: 0,
+    gap: 14,
+  },
+  stationRfidConfirmIconRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidConfirmSummaryText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  stationRfidConfirmVehicleTextCol: {
+    flex: 1,
+    minWidth: 0,
+    gap: 4,
+  },
+  stationRfidConfirmVehicleLine: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+    width: '100%',
+  },
+  stationRfidConfirmVehicleSubline: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT,
+    fontWeight: '800',
+    width: '100%',
+  },
+  stationRfidCompactSelectRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+    minWidth: 0,
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    minHeight: CONNECTOR_PRIMARY_ACTION_BUBBLE_HEIGHT,
+    backgroundColor: '#ffffff',
+  },
+  stationRfidCompactSelectRowTwoLine: {
+    minHeight: STATION_RFID_PICKER_VEHICLE_ROW_MIN_HEIGHT,
+  },
+  stationRfidCompactSelectVehicleStack: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+    justifyContent: 'center',
+  },
+  stationRfidCompactSelectVehiclePlateLine: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_SESSION_VALUE_LINE_HEIGHT,
+    fontWeight: '900',
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidCompactSelectVehicleNameLine: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT,
+    fontWeight: '800',
+    width: '100%',
+    minWidth: 0,
+  },
+  stationRfidCompactSelectLabel: {
+    flex: 1,
+    minWidth: 0,
+  },
+  stationRfidPickerModalRoot: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 14,
+    paddingTop: 44,
+    paddingBottom: 16,
+    gap: 10,
+  },
+  stationRfidPickerModalTitle: {
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_PRIMARY_FONT_SIZE,
+    lineHeight: CONNECTOR_BUBBLE_PRIMARY_LINE_HEIGHT,
+    fontWeight: '900',
+    textAlign: 'center',
+    width: '100%',
+  },
+  stationRfidPickerModalScroll: {
+    flex: 1,
+    minHeight: 160,
+    width: '100%',
+  },
+  stationRfidPickerModalScrollContent: {
+    gap: 8,
+    paddingBottom: 8,
+  },
+  stationRfidTextInput: {
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: lh(CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE, 1.1),
+    fontWeight: '700',
+    color: '#000000',
+    backgroundColor: '#ffffff',
+  },
+  stationRfidErrorText: {
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    color: '#000000',
+    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
+    lineHeight: lh(CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE, 1.18),
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  stationRfidVehicleList: {
+    gap: 8,
   },
   appFrame: {
     flex: 1,
@@ -4426,6 +8168,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingLeft: 8,
+  },
+  stationHeaderDeviceIdPress: {
+    width: '100%',
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   stationHeaderIdText: {
     fontSize: STATION_FONT,
@@ -5146,7 +8894,8 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   connectorOverviewLiveUnitText: {
-    flex: 1,
+    flexGrow: 0,
+    flexShrink: 0,
     fontSize: STATION_FONT,
     lineHeight: lh(STATION_FONT, 1.05),
     fontWeight: '900',
@@ -5155,7 +8904,8 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   connectorOverviewLiveUnitTextFull: {
-    flex: 1,
+    flexGrow: 0,
+    flexShrink: 0,
     fontSize: STATION_FONT,
     lineHeight: lh(STATION_FONT, 1.05),
     fontWeight: '900',
@@ -5229,7 +8979,7 @@ const styles = StyleSheet.create({
     paddingRight: 44,
   },
   connectorBubblePressed: {
-    backgroundColor: '#f3f3f3',
+    opacity: 0.86,
   },
   connectorBubbleLabel: {
     fontSize: TYPO.medium,
@@ -5522,21 +9272,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 2,
   },
-  connectorChargingTimeLabel: {
-    fontSize: CONNECTOR_BUBBLE_SECONDARY_FONT_SIZE,
-    lineHeight: CONNECTOR_BUBBLE_SECONDARY_LINE_HEIGHT,
-    fontWeight: '800',
-    color: '#000000',
-  },
-  connectorChargingMorePressable: {
-    alignSelf: 'flex-start',
-    paddingVertical: 4,
-    marginTop: 2,
-  },
   connectorChargingBreakdownList: {
     width: '100%',
     gap: 8,
     marginTop: 4,
+  },
+  /** Odsadenie pod riadok mince + suma (bez ikon na podriadkoch). */
+  connectorChargingPriceBreakdownIndent: {
+    paddingLeft: CONNECTOR_SESSION_ICON_COL_WIDTH + 6,
   },
   connectorChargingBreakdownRow: {
     flexDirection: 'row',
@@ -5631,6 +9374,75 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#000000',
     marginTop: 4,
+  },
+  /** Odsadenie pre absolútne umiestnenú info ikonku vpravo (bublina nie je celoplošne klikateľná). */
+  connectorAccessBubbleInfoInset: {
+    position: 'relative',
+    paddingRight: 48,
+  },
+  connectorAccessLinkPressable: {
+    alignSelf: 'flex-start',
+  },
+  connectorAccessLinkText: {
+    textDecorationLine: 'underline',
+  },
+  connectorPolicyFeeModalScroll: {
+    flexGrow: 0,
+    flexShrink: 1,
+    maxHeight: 480,
+  },
+  connectorPolicyFeeModalScrollContent: {
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    gap: 12,
+  },
+  connectorPolicyFeeModalRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    width: '100%',
+    borderBottomWidth: 1.5,
+    borderColor: '#000000',
+    paddingBottom: 10,
+  },
+  connectorPolicyFeeModalLabel: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: TYPO.body,
+    lineHeight: lh(TYPO.body),
+    fontWeight: '700',
+    color: '#000000',
+  },
+  connectorPolicyFeeModalValue: {
+    fontSize: TYPO.body,
+    lineHeight: lh(TYPO.body),
+    fontWeight: '900',
+    color: '#000000',
+    flexShrink: 0,
+    fontVariant: ['tabular-nums'],
+  },
+  connectorEroamingListLine: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    width: '100%',
+    paddingVertical: 4,
+  },
+  connectorEroamingListBullet: {
+    fontSize: TYPO.body,
+    lineHeight: lh(TYPO.body),
+    fontWeight: '900',
+    color: '#000000',
+    marginTop: 2,
+  },
+  connectorEroamingListItem: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: TYPO.body,
+    lineHeight: lh(TYPO.body),
+    fontWeight: '700',
+    color: '#000000',
   },
   connectorAccessEroamingEmpCol: {
     alignSelf: 'stretch',
@@ -5844,48 +9656,235 @@ const styles = StyleSheet.create({
     color: '#000000',
     textAlign: 'center',
   },
-  serviceMenuWrap: {
+  serviceSectionCardBody: {
     gap: 10,
+    width: '100%',
   },
-  serviceMenuItems: {
+  serviceQuickPairRow: {
+    flexDirection: 'row',
+    gap: 8,
+    width: '100%',
+    alignSelf: 'stretch',
+    alignItems: 'stretch',
+  },
+  serviceQuickPairCell: {
+    flex: 1,
+    minWidth: 0,
+  },
+  serviceFieldRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
     gap: 10,
+    width: '100%',
   },
-  serviceMenuItem: {
-    borderWidth: 3,
-    borderColor: '#000000',
-    borderRadius: 12,
-    minHeight: 74,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    paddingRight: 42,
-    justifyContent: 'center',
-    overflow: 'hidden',
+  serviceFieldRowBetween: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    width: '100%',
   },
-  serviceMenuItemMain: {
-    minHeight: 42,
-    justifyContent: 'center',
-  },
-  serviceMenuItemText: {
+  serviceFieldLabelFlex: {
     color: '#000000',
     fontSize: TYPO.large,
     lineHeight: lh(TYPO.large),
     fontWeight: '800',
+    flex: 1,
+    minWidth: 0,
+    flexShrink: 1,
   },
-  serviceMenuItemStrip: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    width: 32,
-    backgroundColor: '#000000',
+  serviceFieldKeyLabel: {
+    color: '#000000',
+    fontSize: TYPO.large,
+    lineHeight: lh(TYPO.large),
+    fontWeight: '800',
+    flex: 1,
+    minWidth: 0,
+    flexShrink: 1,
+  },
+  serviceFieldLabel: {
+    color: '#000000',
+    fontSize: TYPO.large,
+    lineHeight: lh(TYPO.large),
+    fontWeight: '800',
+    width: 168,
+    flexShrink: 0,
+  },
+  serviceFieldValueWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  serviceFieldValue: {
+    color: '#000000',
+    fontSize: TYPO.large,
+    lineHeight: lh(TYPO.large),
+    fontWeight: '700',
+  },
+  serviceFieldStack: {
+    width: '100%',
+    gap: 8,
+  },
+  serviceFieldInput: {
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    fontSize: TYPO.large,
+    lineHeight: lh(TYPO.large),
+    fontWeight: '700',
+    color: '#000000',
+    width: '100%',
+    minHeight: 52,
+  },
+  serviceFieldInputZoom: {
+    minHeight: 72,
+  },
+  serviceFieldInputMultiline: {
+    minHeight: 104,
+    textAlignVertical: 'top',
+  },
+  serviceValueChip: {
+    minWidth: 112,
+    maxWidth: 180,
+    minHeight: 44,
+    borderRadius: 10,
+    borderWidth: 3,
+    borderColor: '#000000',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  serviceValueChipText: {
+    color: '#000000',
+    fontSize: TYPO.large,
+    lineHeight: lh(TYPO.large, 1),
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  serviceChipWrap: {
+    width: '100%',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  servicePill: {
+    minHeight: 38,
+    borderRadius: 10,
+    borderWidth: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  serviceMenuItemArrow: {
+  servicePillActive: {
+    backgroundColor: '#000000',
+    borderColor: '#000000',
+  },
+  servicePillInactive: {
+    backgroundColor: '#ffffff',
+    borderColor: '#000000',
+  },
+  servicePillTextActive: {
     color: '#ffffff',
-    fontSize: TYPO.title,
-    lineHeight: lh(TYPO.title),
+    fontSize: TYPO.body,
+    lineHeight: lh(TYPO.body, 1.1),
+    fontWeight: '800',
+  },
+  servicePillTextInactive: {
+    color: '#000000',
+    fontSize: TYPO.body,
+    lineHeight: lh(TYPO.body, 1.1),
+    fontWeight: '800',
+  },
+  serviceJsonBox: {
+    width: '100%',
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#ffffff',
+  },
+  serviceJsonText: {
+    color: '#000000',
+    fontSize: TYPO.body,
+    lineHeight: lh(TYPO.body, 1.3),
+    fontWeight: '700',
+  },
+  serviceProgressTrack: {
+    width: '100%',
+    height: 18,
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: '#ffffff',
+  },
+  serviceProgressFill: {
+    height: '100%',
+    backgroundColor: '#000000',
+  },
+  serviceToggleChipBase: {
+    width: 96,
+    minWidth: 96,
+    maxWidth: 96,
+    minHeight: 44,
+    maxHeight: 44,
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+    borderRadius: 10,
+    borderWidth: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  serviceToggleChipBaseZoom: {
+    width: 116,
+    minWidth: 116,
+    maxWidth: 116,
+    minHeight: 56,
+    maxHeight: 56,
+  },
+  serviceToggleChipOn: {
+    backgroundColor: '#000000',
+    borderColor: '#000000',
+  },
+  serviceToggleChipOff: {
+    backgroundColor: '#ffffff',
+    borderColor: '#000000',
+  },
+  serviceToggleChipDisabled: {
+    opacity: 0.78,
+  },
+  serviceToggleChipTextOn: {
+    color: '#ffffff',
+    fontSize: TYPO.large,
+    lineHeight: lh(TYPO.large, 1),
     fontWeight: '900',
+    textAlign: 'center',
+    width: '100%',
+  },
+  serviceToggleChipTextOff: {
+    color: '#000000',
+    fontSize: TYPO.large,
+    lineHeight: lh(TYPO.large, 1),
+    fontWeight: '900',
+    textAlign: 'center',
+    width: '100%',
+  },
+  serviceUrlInput: {
+    borderWidth: 3,
+    borderColor: '#000000',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    fontSize: TYPO.body,
+    fontWeight: '700',
+    color: '#000000',
+    width: '100%',
   },
   servicePinWrap: {
     flex: 1,
@@ -6026,35 +10025,6 @@ const styles = StyleSheet.create({
     fontSize: Math.round(STATION_FONT * 0.58),
     lineHeight: lh(Math.round(STATION_FONT * 0.58), 1),
     fontWeight: '900',
-  },
-  serviceFinalWrap: {
-    gap: 12,
-  },
-  serviceFinalTitle: {
-    color: '#000000',
-    fontSize: TYPO.title,
-    lineHeight: lh(TYPO.title),
-    fontWeight: '900',
-  },
-  serviceFinalCard: {
-    borderWidth: 2,
-    borderColor: '#000000',
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    gap: 8,
-  },
-  serviceFinalLabel: {
-    color: '#000000',
-    fontSize: TYPO.body,
-    lineHeight: lh(TYPO.body),
-    fontWeight: '700',
-  },
-  serviceFinalHint: {
-    color: '#000000',
-    fontSize: TYPO.medium,
-    lineHeight: lh(TYPO.medium, 1.25),
-    fontWeight: '700',
   },
   /** Pod identitou konektora — zarovnanie s `connectorPrimaryActionShell` (bez duplicitného marginTop z pôvodnej session bubliny). */
   connectorEndChargeQuickBubble: {
@@ -6540,7 +10510,7 @@ const styles = StyleSheet.create({
     marginBottom: 1,
   },
   infoActionPressed: {
-    backgroundColor: '#f2f2f2',
+    opacity: 0.86,
   },
   infoReaderBody: {
     flex: 1,

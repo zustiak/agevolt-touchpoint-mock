@@ -14,8 +14,10 @@ export const KIOSK_HEIGHT = 1280;
 
 /** Per-screen vertical scroll: home stays fixed; overlays with variable content may scroll. */
 
-export const SCREEN_SCROLL_VERTICAL: Record<'language' | 'support', boolean> = {
+export const SCREEN_SCROLL_VERTICAL: Record<'language' | 'support' | 'serviceMenu', boolean> = {
   language: false,
   support: true,
+  /** Servisné menu (hub + podstránky): výlučne tu používame vertikálny scroll v overlayi. */
+  serviceMenu: true,
 };
 

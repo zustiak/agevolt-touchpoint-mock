@@ -18,11 +18,11 @@ alwaysApply: true
 - If data has both `INIT + OCPP_KEY`, treat `OCPP_KEY` as higher-priority runtime value.
 - State logic to preserve:
   - `available` -> `preparing` -> `charging`
-  - if charging pauses after first real charge, use `suspended` (not `preparing`)
-  - stop request enters `finishing` before returning to `available`
+  - if charging pauses after first real charge, use `suspendedEV` / `suspendedEVSE` (not `preparing`)
+  - stop request returns to `available` (no separate “finishing” UI state)
   - preparing timeout cancels session after 5:00 if charging never starts
 - Keep remote flow aligned with local flow: accepted remote start/stop must enter the same TX state machine.
-- Remote start is valid only for a specific connector and only when connector has no active TX and is not faulted.
+- Remote start is valid only for a specific connector and only when connector has no active TX and is not in a fault status (`faultedWithTransa` / `faultedWithoutTransa`).
 - Charging detail access is protected: unlock by RFID or 6-digit PIN/session code.
 - For private connector access denied, show clear error message and safe return path.
 - Prioritize small, isolated, reusable React Native components and avoid unnecessary dependency additions.
