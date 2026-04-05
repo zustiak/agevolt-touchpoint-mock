@@ -29,6 +29,73 @@
     "currency": "EUR",
     "vatRate": 0.23
   },
+  "rfidCards": [
+    {
+      "uid": "TESTCTRL_AA",
+      "known": true,
+      "blocked": false,
+      "accountId": "acc-jozef",
+      "vehicleId": "veh-enyaq"
+    },
+    {
+      "uid": "TESTCTRL_BB",
+      "known": true,
+      "blocked": false,
+      "accountId": "acc-jozef",
+      "vehicleId": "veh-enyaq"
+    },
+    {
+      "uid": "TESTCTRL_CC",
+      "known": true,
+      "blocked": true,
+      "accountId": "acc-jozef",
+      "vehicleId": "veh-enyaq"
+    },
+    {
+      "uid": "TESTCTRL_DD",
+      "known": false
+    }
+  ],
+  "accounts": [
+    {
+      "id": "acc-jozef",
+      "login": "jozef",
+      "password": "heslo123",
+      "driverName": "Jozef Novak",
+      "driverEmail": "jozef.novak.skoda@example.com",
+      "spaces": [
+        { "id": "sp-hotel-lesna", "name": "Hotel Lesná", "role": "owner" },
+        { "id": "sp-garage-centrum", "name": "Garáž Centrum", "role": "admin" }
+      ],
+      "vehicles": [
+        {
+          "id": "veh-enyaq",
+          "plate": "BA 123XY",
+          "name": "Skoda Enyaq 80 Max"
+        },
+        {
+          "id": "veh-bolt",
+          "plate": "TT 444EV",
+          "name": "Chevrolet Bolt"
+        }
+      ]
+    },
+    {
+      "id": "acc-anna",
+      "login": "anna",
+      "password": "anna123",
+      "driverName": "Anna Fischer",
+      "driverEmail": "anna.fischer.ev@example.com",
+      "spaces": [{ "id": "sp-anna-dom", "name": "Dom", "role": "owner" }],
+      "vehicles": [
+        {
+          "id": "veh-tesla",
+          "plate": "BL 777EL",
+          "name": "Tesla Model 3"
+        }
+      ]
+    }
+  ],
   "connectors": [
     {
       "id": "c1",
@@ -43,13 +110,19 @@
         "unauthorizedFreeCharging": false,
         "publicCharging": true,
         "roamingCharging": true,
-        "privateCharging": false
+        "privateCharging": true
       },
       "hasPublicPolicy": true,
       "hasEroamingHubject": true,
-      "eroamingEmpList": ["Plugsurfing", "Shell Recharge", "EnBW mobility+"],
+      "eroamingEmpList": [
+        "Plugsurfing",
+        "Shell Recharge",
+        "EnBW mobility+",
+        "Ionity",
+        "Fastned"
+      ],
       "budgetAmps": 10,
-      "vehicleSignalV": 12,
+      "vehicleSignalV": 6,
       "connectTimeoutSec": 300,
       "publicPolicy": {
         "price": 0.42,
@@ -59,8 +132,26 @@
         "graceFrom": "end",
         "occupyPerHour": 8.0
       },
+      "rfidAccountPolicies": [
+        {
+          "accountId": "acc-jozef",
+          "allowedStart": true,
+          "accessMode": "shared",
+          "pricePerKwh": 0.18,
+          "priceLabel": "0.18 EUR/kWh",
+          "hasAdditionalFees": true
+        },
+        {
+          "accountId": "acc-anna",
+          "allowedStart": true,
+          "accessMode": "public",
+          "pricePerKwh": 0.42,
+          "priceLabel": "0.42 EUR/kWh",
+          "hasAdditionalFees": true
+        }
+      ],
       "meter": {
-        "power": 0,
+        "power": 8.2,
         "energy": 15.42
       },
       "txTotalSec": 3723,
@@ -74,16 +165,28 @@
           "charging",
           "suspendedEV",
           "suspendedEVSE",
-          "suspended",
-          "finishing",
           "disconnectEV",
           "faultedWithTransa",
-          "faultedWithoutTransa",
-          "faulted"
+          "faultedWithoutTransa"
         ],
-        "status": "disconnectEV"
+        "status": "charging"
       },
-      "activeTx": null
+      "activeTx": {
+        "id": "tx-c1-live",
+        "chargingTime": "01:02:03",
+        "costWithVat": 6.84,
+        "pricePerKwh": 0.18,
+        "hasAdditionalFees": true,
+        "rfidTag": "TESTCTRL_AA",
+        "parentTag": null,
+        "linkedCardUid": "TESTCTRL_AA",
+        "accountId": "acc-jozef",
+        "vehicleId": "veh-enyaq",
+        "vehiclePlate": "BA 123XY",
+        "vehicleName": "Skoda Enyaq 80 Max",
+        "driverEmail": "jozef.novak.skoda@example.com",
+        "accessMode": "shared"
+      }
     },
     {
       "id": "c2",
@@ -102,7 +205,7 @@
       },
       "hasPublicPolicy": false,
       "budgetAmps": 10,
-      "vehicleSignalV": 9,
+      "vehicleSignalV": 12,
       "connectTimeoutSec": 300,
       "publicPolicy": {
         "price": 0.39,
@@ -112,6 +215,23 @@
         "graceFrom": "end",
         "occupyPerHour": 6.0
       },
+      "rfidAccountPolicies": [
+        {
+          "accountId": "acc-jozef",
+          "allowedStart": true,
+          "accessMode": "private",
+          "pricePerKwh": 0.0,
+          "priceLabel": "0.00 EUR/kWh",
+          "hasAdditionalFees": false
+        },
+        {
+          "accountId": "acc-anna",
+          "allowedStart": false,
+          "accessMode": "private",
+          "priceLabel": "Private",
+          "denyReasonKey": "rfid.station.deniedPrivateOnly"
+        }
+      ],
       "meter": {
         "power": 0,
         "energy": 0
@@ -125,14 +245,11 @@
           "charging",
           "suspendedEV",
           "suspendedEVSE",
-          "suspended",
-          "finishing",
           "disconnectEV",
           "faultedWithTransa",
-          "faultedWithoutTransa",
-          "faulted"
+          "faultedWithoutTransa"
         ],
-        "status": "faultedWithoutTransa"
+        "status": "available"
       },
       "activeTx": null
     }
