@@ -52,7 +52,6 @@ Access a pricing:
 - `connector[].publicPolicy.policyEndUtc` (INIT)
 - `connector[].publicPolicy.withoutTimeSchedule` (INIT)
 - `connector[].publicPolicy.scheduleActiveNow` (INIT)
-- `connector[].publicPolicy.validNow` (INIT)
 - `connector[].publicPolicy.schedule[]` (INIT)
 
 Runtime charging/session:
@@ -82,8 +81,8 @@ Podla `TX_AND_CHARGING_STATE` + `OCPP_STATUS_NOTIFICATION`:
 - Start accepted -> connector ide do `preparing`.
 - V `preparing` ostava az po prvy realny prechod do charging.
 - Ak 5 minut neprejde do prveho charging, transaction sa zrusi.
-- Po prvom charging pri navrate do 9V je stav `suspended` (nie `preparing`).
-- Stop request -> budget 0 -> wait safe stop state -> `finishing` -> `available`.
+- Po prvom charging pri navrate do 9V je stav `suspendedEV` / `suspendedEVSE` (nie `preparing`).
+- Stop request -> budget 0 -> wait safe stop state -> `available` (v mock UI bez stavu `finishing`).
 - Remote start/stop po accept ide do toho isteho lokalneho TX flow ako lokalny start/stop.
 
 ## 5) Remote-start obmedzenia do UX
@@ -103,4 +102,4 @@ Podla `OCPP_REMOTE_START_STOP`:
   - connector: `parkingSpot`, `plugType`, `powerType`, `maxAmps/phases`->`maxPowerKw`, `hasPublicPolicy`,
     `publicPolicy.price`, `activeTx.*`, `meter.power`, `meter.energy`, `ocpp.status`
 - Statusy mapovat na kiosk copy:
-  - `available`, `preparing`, `charging`, `suspended`, `finishing`, `faulted`
+  - `available`, `preparing`, `charging`, `suspendedEV`, `suspendedEVSE`, `faultedWithTransa`, `faultedWithoutTransa`

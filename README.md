@@ -11,7 +11,7 @@ Klikatelny React Native mock pre kiosk UI (Wiseasy P5L SSK) so zameranim na pozi
 - Start cez RFID alebo QR remote start.
 - Preparing stav s 5:00 timeout simulaciou.
 - Unlock aktivnej session cez RFID/PIN.
-- Detail aktivnej session + stop do finishing.
+- Detail aktivnej session + zastavenie, navrat na volny konektor.
 - Global overlays: jazyk, podpora, info.
 
 ## Implementacny plan (realizovany)
@@ -51,7 +51,7 @@ Klikatelny React Native mock pre kiosk UI (Wiseasy P5L SSK) so zameranim na pozi
 5. Home (charging) -> klik na nabijaaci konektor.
 6. Unlock -> RFID alebo PIN.
 7. Session detail -> `Zastavit nabijanie`.
-8. Home (finishing) -> `Spristupnit`.
+8. Home (available) -> `Spristupnit`.
 
 ### QR remote start
 

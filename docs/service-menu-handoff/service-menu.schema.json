@@ -1,0 +1,351 @@
+{
+  "appType": "TOUCHPOINT_CLIENT",
+  "entryFlow": [
+    "HomeSupportButton",
+    "SupportScreen",
+    "SettingsTabs"
+  ],
+  "guards": {
+    "blockSettingsWhenChargingActive": true,
+    "optionalAdminPassword": true,
+    "roles": [
+      "service",
+      "admin"
+    ]
+  },
+  "menuTree": [
+    {
+      "id": "support",
+      "title": "Podpora",
+      "children": [
+        {
+          "id": "settings",
+          "title": "Nastavenia",
+          "children": [
+            {
+              "id": "general",
+              "title": "Všeobecné"
+            },
+            {
+              "id": "integrations",
+              "title": "Integrácie"
+            },
+            {
+              "id": "mqtt",
+              "title": "MQTT",
+              "status": "legacy_optional"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "browser",
+      "title": "Prehliadač"
+    },
+    {
+      "id": "firmwareUpdate",
+      "title": "Aktualizácia firmvéru EV modulu"
+    },
+    {
+      "id": "connectorsConfig",
+      "title": "Konfigurácia konektorov"
+    }
+  ],
+  "screens": {
+    "support": {
+      "data": [
+        {
+          "key": "stationName",
+          "type": "string",
+          "example": "Default Station"
+        },
+        {
+          "key": "helpdeskName",
+          "type": "string|null",
+          "example": "AgeVolt Helpdesk"
+        },
+        {
+          "key": "helpdeskNumber",
+          "type": "string|null",
+          "example": "+421 2 221 222 11"
+        },
+        {
+          "key": "helpdeskMail",
+          "type": "string|null",
+          "example": "support@agevolt.com"
+        },
+        {
+          "key": "connectors[].transactionId",
+          "type": "number|null",
+          "example": null
+        }
+      ],
+      "quickActions": [
+        "openHelpdeskChat",
+        "enterSettings"
+      ]
+    },
+    "general": {
+      "data": [
+        {
+          "key": "deviceId",
+          "type": "string",
+          "example": "TP-DEVICE-001"
+        },
+        {
+          "key": "version",
+          "type": "string",
+          "example": "4.6.0 (160)"
+        },
+        {
+          "key": "prices",
+          "type": "Record<number, number>",
+          "example": {
+            "1": 0.5,
+            "2": 0.5
+          }
+        },
+        {
+          "key": "refundFee",
+          "type": "number",
+          "example": 0.75
+        },
+        {
+          "key": "isContrast",
+          "type": "boolean",
+          "example": true
+        },
+        {
+          "key": "isInverseContrast",
+          "type": "boolean",
+          "example": false
+        },
+        {
+          "key": "language",
+          "type": "'sk'|'en'",
+          "example": "sk"
+        }
+      ],
+      "quickActions": [
+        "save",
+        "resetTouchpoint",
+        "restartApp"
+      ]
+    },
+    "integrations": {
+      "data": [
+        {
+          "key": "ocpp.statusPhase",
+          "type": "string",
+          "example": "OCPP_CONNECTED_STATE"
+        },
+        {
+          "key": "mqtt.statusPhase",
+          "type": "string",
+          "example": "MQTT_CONNECT_ERROR"
+        },
+        {
+          "key": "ocpp.url",
+          "type": "string",
+          "example": "ocpp.my.agevolt.com"
+        },
+        {
+          "key": "ocpp.port",
+          "type": "number",
+          "example": 443
+        },
+        {
+          "key": "ocpp.path",
+          "type": "string",
+          "example": "ocpp"
+        },
+        {
+          "key": "meterValueSampleInterval",
+          "type": "number",
+          "example": 10
+        },
+        {
+          "key": "vendor",
+          "type": "string",
+          "example": "AgeVolt"
+        },
+        {
+          "key": "model",
+          "type": "string",
+          "example": "Touchpoint CSMS"
+        },
+        {
+          "key": "stationSerialNumber",
+          "type": "string",
+          "example": "TP-001"
+        },
+        {
+          "key": "maxCurrent",
+          "type": "number",
+          "example": 32
+        },
+        {
+          "key": "connectorCount",
+          "type": "number",
+          "example": 2
+        },
+        {
+          "key": "modbusAddresses",
+          "type": "{meter1:number,evm1:number,meter2:number,evm2:number}",
+          "example": {
+            "meter1": 1,
+            "evm1": 2,
+            "meter2": 3,
+            "evm2": 4
+          }
+        }
+      ],
+      "quickActions": [
+        "save",
+        "connectOcpp",
+        "disconnectOcpp",
+        "connectModbus",
+        "disconnectModbus",
+        "connectMqtt",
+        "disconnectMqtt",
+        "openFirmwareUpdate",
+        "openConnectorsConfig"
+      ]
+    },
+    "browser": {
+      "data": [
+        {
+          "key": "webAddress",
+          "type": "string",
+          "example": "https://agevolt.ladesk.com/scripts/inline_chat.php?cwid=3393y54b"
+        },
+        {
+          "key": "loadUrl",
+          "type": "string|undefined",
+          "example": "https://example.com"
+        }
+      ],
+      "quickActions": [
+        "loadUrl"
+      ]
+    },
+    "firmwareUpdate": {
+      "data": [
+        {
+          "key": "firmwareUrl",
+          "type": "string|undefined",
+          "example": "https://bucket/fw/C-EV-2505M-TP-115200+7.tfw"
+        },
+        {
+          "key": "connectorId",
+          "type": "number|undefined",
+          "example": 1
+        },
+        {
+          "key": "isDownloading",
+          "type": "boolean",
+          "example": false
+        },
+        {
+          "key": "isDownloadComplete",
+          "type": "boolean",
+          "example": true
+        },
+        {
+          "key": "fileName",
+          "type": "string",
+          "example": "C-EV-2505M-TP-115200+7.tfw"
+        },
+        {
+          "key": "fileVersion",
+          "type": "string",
+          "example": "1.0.24"
+        },
+        {
+          "key": "fileSize",
+          "type": "number",
+          "example": 262144
+        },
+        {
+          "key": "isCRCOK",
+          "type": "boolean",
+          "example": true
+        },
+        {
+          "key": "sendProgress",
+          "type": "number",
+          "example": 57.3
+        },
+        {
+          "key": "currentFirmwareVersions",
+          "type": "Record<number,string>",
+          "example": {
+            "0": "5.3",
+            "1": "5.3"
+          }
+        }
+      ],
+      "quickActions": [
+        "downloadFirmware",
+        "startUpdate",
+        "stopUpdate"
+      ]
+    },
+    "connectorsConfig": {
+      "data": [
+        {
+          "key": "configData[].serialNumber",
+          "type": "string",
+          "example": "TP123456"
+        },
+        {
+          "key": "configData[].hardwareAddress",
+          "type": "number",
+          "example": 2
+        },
+        {
+          "key": "configData[].hardwareType",
+          "type": "string",
+          "example": "C-EV-2505M-TP"
+        },
+        {
+          "key": "configData[].firmwareVersion",
+          "type": "string",
+          "example": "5.3"
+        },
+        {
+          "key": "configData[].maxAmpsLimit",
+          "type": "number",
+          "example": 32
+        },
+        {
+          "key": "configData[].sampleInterval",
+          "type": "number",
+          "example": 10
+        },
+        {
+          "key": "modbusAddressesByConnector",
+          "type": "Record<number,{evmAddress:number,meterAddress:number}>",
+          "example": {
+            "1": {
+              "evmAddress": 2,
+              "meterAddress": 1
+            }
+          }
+        },
+        {
+          "key": "meterRuntime",
+          "type": "runtime object",
+          "example": {
+            "power": 7360,
+            "energy": 12450
+          }
+        }
+      ],
+      "quickActions": [
+        "readAgain"
+      ]
+    }
+  }
+}

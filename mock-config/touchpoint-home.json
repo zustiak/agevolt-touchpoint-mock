@@ -10,7 +10,8 @@
       "name": "Hotel Lesná"
     },
     "provider": {
-      "logo": "AGEVOLT"
+      "logo": "AGEVOLT",
+      "name": "AgeVolt"
     },
     "helpdeskNumber": "+421 911 000 111",
     "helpdeskEmail": "support@agevolt.sk",
@@ -28,11 +29,78 @@
     "currency": "EUR",
     "vatRate": 0.23
   },
+  "rfidCards": [
+    {
+      "uid": "TESTCTRL_AA",
+      "known": true,
+      "blocked": false,
+      "accountId": "acc-jozef",
+      "vehicleId": "veh-enyaq"
+    },
+    {
+      "uid": "TESTCTRL_BB",
+      "known": true,
+      "blocked": false,
+      "accountId": "acc-jozef",
+      "vehicleId": "veh-enyaq"
+    },
+    {
+      "uid": "TESTCTRL_CC",
+      "known": true,
+      "blocked": true,
+      "accountId": "acc-jozef",
+      "vehicleId": "veh-enyaq"
+    },
+    {
+      "uid": "TESTCTRL_DD",
+      "known": false
+    }
+  ],
+  "accounts": [
+    {
+      "id": "acc-jozef",
+      "login": "jozef",
+      "password": "heslo123",
+      "driverName": "Jozef Novak",
+      "driverEmail": "jozef.novak.skoda@example.com",
+      "spaces": [
+        { "id": "sp-hotel-lesna", "name": "Hotel Lesná", "role": "owner" },
+        { "id": "sp-garage-centrum", "name": "Garáž Centrum", "role": "admin" }
+      ],
+      "vehicles": [
+        {
+          "id": "veh-enyaq",
+          "plate": "BA 123XY",
+          "name": "Skoda Enyaq 80 Max"
+        },
+        {
+          "id": "veh-bolt",
+          "plate": "TT 444EV",
+          "name": "Chevrolet Bolt"
+        }
+      ]
+    },
+    {
+      "id": "acc-anna",
+      "login": "anna",
+      "password": "anna123",
+      "driverName": "Anna Fischer",
+      "driverEmail": "anna.fischer.ev@example.com",
+      "spaces": [{ "id": "sp-anna-dom", "name": "Dom", "role": "owner" }],
+      "vehicles": [
+        {
+          "id": "veh-tesla",
+          "plate": "BL 777EL",
+          "name": "Tesla Model 3"
+        }
+      ]
+    }
+  ],
   "connectors": [
     {
       "id": "c1",
       "evseCpoId": "SK*AGV*E1*20517*85*1",
-      "parkingSpot": "A12",
+      "parkingSpot": "A1222",
       "chargingLink": "https://charge.agevolt.com/start?connector=c1",
       "plugType": "Type 2 Outlet",
       "powerType": "AC",
@@ -42,11 +110,19 @@
         "unauthorizedFreeCharging": false,
         "publicCharging": true,
         "roamingCharging": true,
-        "privateCharging": false
+        "privateCharging": true
       },
       "hasPublicPolicy": true,
+      "hasEroamingHubject": true,
+      "eroamingEmpList": [
+        "Plugsurfing",
+        "Shell Recharge",
+        "EnBW mobility+",
+        "Ionity",
+        "Fastned"
+      ],
       "budgetAmps": 10,
-      "vehicleSignalV": 12,
+      "vehicleSignalV": 6,
       "connectTimeoutSec": 300,
       "publicPolicy": {
         "price": 0.42,
@@ -54,33 +130,68 @@
         "parkingPerHour": 2.5,
         "graceMinutes": 15,
         "graceFrom": "end",
-        "occupyPerHour": 8.0,
-        "validNow": true
+        "occupyPerHour": 8.0
       },
+      "rfidAccountPolicies": [
+        {
+          "accountId": "acc-jozef",
+          "allowedStart": true,
+          "accessMode": "shared",
+          "pricePerKwh": 0.18,
+          "priceLabel": "0.18 EUR/kWh",
+          "hasAdditionalFees": true
+        },
+        {
+          "accountId": "acc-anna",
+          "allowedStart": true,
+          "accessMode": "public",
+          "pricePerKwh": 0.42,
+          "priceLabel": "0.42 EUR/kWh",
+          "hasAdditionalFees": true
+        }
+      ],
       "meter": {
-        "power": 0,
-        "energy": 0
+        "power": 8.2,
+        "energy": 15.42
       },
+      "txTotalSec": 3723,
+      "chargingActiveSec": 3600,
       "ocpp": {
         "_status": [
           "available",
           "EVconnected",
-          "cennectEV",
+          "connectEV",
           "preparing",
           "charging",
           "suspendedEV",
           "suspendedEVSE",
+          "disconnectEV",
           "faultedWithTransa",
           "faultedWithoutTransa"
         ],
-        "status": "available"
+        "status": "charging"
       },
-      "activeTx": null
+      "activeTx": {
+        "id": "tx-c1-live",
+        "chargingTime": "01:02:03",
+        "costWithVat": 6.84,
+        "pricePerKwh": 0.18,
+        "hasAdditionalFees": true,
+        "rfidTag": "TESTCTRL_AA",
+        "parentTag": null,
+        "linkedCardUid": "TESTCTRL_AA",
+        "accountId": "acc-jozef",
+        "vehicleId": "veh-enyaq",
+        "vehiclePlate": "BA 123XY",
+        "vehicleName": "Skoda Enyaq 80 Max",
+        "driverEmail": "jozef.novak.skoda@example.com",
+        "accessMode": "shared"
+      }
     },
     {
       "id": "c2",
       "evseCpoId": "SK*AGV*E1*20517*85*2",
-      "parkingSpot": "P9",
+      "parkingSpot": "P9999",
       "chargingLink": "https://charge.agevolt.com/start?connector=c2",
       "plugType": "Type 2 Outlet",
       "powerType": "AC",
@@ -94,7 +205,7 @@
       },
       "hasPublicPolicy": false,
       "budgetAmps": 10,
-      "vehicleSignalV": 9,
+      "vehicleSignalV": 12,
       "connectTimeoutSec": 300,
       "publicPolicy": {
         "price": 0.39,
@@ -102,9 +213,25 @@
         "parkingPerHour": 2.0,
         "graceMinutes": 10,
         "graceFrom": "end",
-        "occupyPerHour": 6.0,
-        "validNow": true
+        "occupyPerHour": 6.0
       },
+      "rfidAccountPolicies": [
+        {
+          "accountId": "acc-jozef",
+          "allowedStart": true,
+          "accessMode": "private",
+          "pricePerKwh": 0.0,
+          "priceLabel": "0.00 EUR/kWh",
+          "hasAdditionalFees": false
+        },
+        {
+          "accountId": "acc-anna",
+          "allowedStart": false,
+          "accessMode": "private",
+          "priceLabel": "Private",
+          "denyReasonKey": "rfid.station.deniedPrivateOnly"
+        }
+      ],
       "meter": {
         "power": 0,
         "energy": 0
@@ -113,15 +240,16 @@
         "_status": [
           "available",
           "EVconnected",
-          "cennectEV",
+          "connectEV",
           "preparing",
           "charging",
           "suspendedEV",
           "suspendedEVSE",
+          "disconnectEV",
           "faultedWithTransa",
           "faultedWithoutTransa"
         ],
-        "status": "faultedWithoutTransa"
+        "status": "available"
       },
       "activeTx": null
     }
